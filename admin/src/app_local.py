@@ -11,10 +11,10 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'local-dev-secret-key')
 
 # 데이터베이스 및 캐시 임포트
-from server.database_local import (
+from lib.database_local import (
     get_all_users, get_today_attendance, get_statistics
 )
-from server.zmq_server_local import get_cached_data
+from lib.zmq_server_local import get_cached_data
 
 # 관리자 로그인
 @app.route('/admin/login', methods=['GET', 'POST'])

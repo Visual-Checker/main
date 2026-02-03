@@ -16,10 +16,10 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
 # 음성 인식 서비스 import
-from voice_service import VoiceService
+from lib.voice_service import VoiceService
 
 # 제스처 인식 서비스 import
-from gesture_service import GestureService
+from lib.gesture_service import GestureService
 
 # MediaPipe import
 MEDIAPIPE_AVAILABLE = False
@@ -41,7 +41,7 @@ except ImportError:
     print("⚠️  MediaPipe가 설치되지 않았습니다.")
 
 # UI 설정 임포트
-from ui_config_lib import *
+from lib.ui_config_lib import *
 
 
 class AdminUI(QMainWindow):

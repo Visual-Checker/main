@@ -51,7 +51,7 @@ except Exception:
     print("ℹ️  SpeechBrain(음성 모델)을 사용할 수 없습니다.")
 
 # UI 설정 임포트
-from ui_config_lib import *
+from lib.ui_config_lib import *
 
 
 class ClientUI(QMainWindow):

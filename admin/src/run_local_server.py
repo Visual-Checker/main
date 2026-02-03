@@ -24,14 +24,14 @@ print()
 
 # 1. 데이터베이스 초기화
 print("[1/3] 데이터베이스 초기화...")
-from server.database_local import init_database
+from lib.database_local import init_database
 init_database()
 print("✓ SQLite 데이터베이스 준비 완료")
 
 # 2. ZeroMQ 서버 시작 (백그라운드)
 print()
 print("[2/3] ZeroMQ 서버 시작...")
-from server.zmq_server_local import start_zmq_server
+from lib.zmq_server_local import start_zmq_server
 import threading
 zmq_thread = threading.Thread(target=start_zmq_server, daemon=True)
 zmq_thread.start()
@@ -52,5 +52,5 @@ print()
 print("Ctrl+C로 종료")
 print()
 
-from server.app_local import app
+from app_local import app
 app.run(host='127.0.0.1', port=5000, debug=False)

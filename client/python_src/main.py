@@ -11,8 +11,8 @@ import cv2
 from datetime import datetime
 from dotenv import load_dotenv
 
-from database import get_db, User, Course, AttendanceRecord, ClassSession, Enrollment
-from face_detector import FaceDetector
+from lib.database import get_db, User, Course, AttendanceRecord, ClassSession, Enrollment
+from lib.face_detector import FaceDetector
 from sqlalchemy import func, and_
 
 load_dotenv()
