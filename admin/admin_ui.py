@@ -10,10 +10,16 @@ import pickle
 import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QLineEdit, QMessageBox, QInputDialog
+    QVBoxLayout, QHBoxLayout, QLineEdit, QMessageBox, QInputDialog, QFileDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
+
+# 음성 인식 서비스 import
+from voice_service import VoiceService
+
+# 제스처 인식 서비스 import
+from gesture_service import GestureService
 
 # MediaPipe import
 MEDIAPIPE_AVAILABLE = False
@@ -52,6 +58,12 @@ class AdminUI(QMainWindow):
         
         # 얼굴 감지기 초기화
         self.face_detector = None
+        
+        # 음성 서비스 초기화
+        self.voice_service = VoiceService()
+        
+        # 제스처 서비스 초기화
+        self.gesture_service = GestureService()
         
         if MEDIAPIPE_AVAILABLE and USE_TASK_API:
             try:
@@ -404,11 +416,24 @@ class AdminUI(QMainWindow):
             self.update_status("📷 사진 등록 모드")
             QMessageBox.information(self, "사진 등록", "사진 등록 기능이 선택되었습니다.")
         elif button_name == "voice_register":
-            self.update_status("🎤 목소리 등록 모드")
-            QMessageBox.information(self, "목소리 등록", "목소리 등록 기능이 선택되었습니다.")
+            # 음성 등록/인식 옵션 선택
+            options = ["음성 등록", "음성 인식"]
+            choice, ok = QInputDialog.getItem(
+                self,
+                "음성 모드 선택",
+                "수행할 작업을 선택하세요:",
+                options,
+                0,
+                False
+            )
+            
+            if ok:
+                if choice == "음성 등록":
+                    self.voice_register_mode()
+                elif choice == "음성 인식":
+                    self.voice_recognize_mode()
         elif button_name == "gesture_register":
-            self.update_status("👋 제스처 등록 모드")
-            QMessageBox.information(self, "제스처 등록", "제스처 등록 기능이 선택되었습니다.")
+            self.gesture_register_mode()
     
     def on_right_button_click(self, button_name):
         """우측 버튼 클릭 이벤트"""
@@ -522,6 +547,270 @@ class AdminUI(QMainWindow):
                 self.status_bar.styleSheet().replace(ACCENT_COLOR, STATUS_BAR_BG_COLOR)
             )
         self.status_bar.setText(message)
+    
+    def voice_register_mode(self):
+        """음성 등록 모드 (음성 녹음)"""
+        # 사용자 이름 입력
+        name, ok = QInputDialog.getText(
+            self,
+            "사용자 이름 입력",
+            "등록할 사용자의 이름을 입력하세요:"
+        )
+        
+        if not ok or not name.strip():
+            self.update_status("❌ 사용자 이름 입력 취소됨")
+            return
+        
+        name = name.strip()
+        
+        # 녹음 시간 입력 (기본값: 3초)
+        duration, ok = QInputDialog.getInt(
+            self,
+            "녹음 시간 설정",
+            "녹음 시간(초)을 입력하세요:",
+            3,
+            1,
+            10
+        )
+        
+        if not ok:
+            self.update_status("❌ 녹음 시간 설정 취소됨")
+            return
+        
+        # 녹음 확인
+        confirm = QMessageBox.question(
+            self,
+            "녹음 시작",
+            f"{name}의 음성을 {duration}초간 녹음합니다.\n마이크를 준비하세요.\n계속할까요?"
+        )
+        
+        if confirm != QMessageBox.Yes:
+            self.update_status("❌ 음성 녹음 취소됨")
+            return
+        
+        # 음성 녹음
+        self.update_status(f"🎤 음성 녹음 중... ({duration}초)")
+        
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+            import numpy as np
+            
+            # 오디오 장치 확인
+            try:
+                devices = sd.query_devices()
+                print("사용 가능한 오디오 장치:")
+                print(devices)
+                
+                # 입력 장치 찾기
+                input_devices = []
+                for i, device in enumerate(devices):
+                    if device['max_input_channels'] > 0:
+                        input_devices.append((i, device['name']))
+                
+                if not input_devices:
+                    raise Exception("마이크 입력 장치를 찾을 수 없습니다.")
+                
+                print(f"발견된 입력 장치: {len(input_devices)}개")
+                for idx, name in input_devices:
+                    print(f"  [{idx}] {name}")
+                
+                # 첫 번째 입력 장치를 기본으로 사용
+                device_id = input_devices[0][0]
+                device_name = input_devices[0][1]
+                print(f"사용할 장치: [{device_id}] {device_name}")
+                
+            except Exception as device_error:
+                self.update_status(f"❌ 오디오 장치 확인 실패: {str(device_error)}")
+                QMessageBox.warning(
+                    self,
+                    "오디오 장치 오류",
+                    f"오디오 장치를 찾을 수 없습니다.\n\n마이크가 연결되어 있는지 확인하세요.\n\n에러: {str(device_error)}"
+                )
+                return
+            
+            # 임시 음성 파일 저장
+            temp_audio_file = "./tmp_voice_recording.wav"
+            sample_rate = 16000
+            
+            # 녹음
+            print(f"🎤 녹음 시작... ({duration}초)")
+            QMessageBox.information(
+                self,
+                "녹음 시작",
+                f"{duration}초 후 자동으로 종료됩니다.\n지금부터 말씀하세요!"
+            )
+            
+            audio_data = sd.rec(
+                int(duration * sample_rate), 
+                samplerate=sample_rate, 
+                channels=1, 
+                dtype='float32',
+                device=device_id  # 명시적으로 장치 지정
+            )
+            sd.wait()  # 녹음 완료 대기
+            
+            # 파일로 저장
+            sf.write(temp_audio_file, audio_data, sample_rate)
+            print(f"✓ 녹음 완료: {temp_audio_file}")
+            
+            # 음성 데이터 등록
+            self.update_status(f"🎤 음성 데이터 처리 중... ({name})")
+            
+            success = self.voice_service.register_voice(temp_audio_file, name)
+            
+            if success:
+                self.voice_service.save_voice_data()
+                self.update_status(f"✅ {name}의 음성 데이터 등록 완료")
+                QMessageBox.information(
+                    self,
+                    "등록 완료",
+                    f"{name}의 음성 데이터가 성공적으로 등록되었습니다."
+                )
+            else:
+                self.update_status("❌ 음성 데이터 등록 실패")
+                QMessageBox.warning(
+                    self,
+                    "등록 실패",
+                    "음성 데이터 등록 중 오류가 발생했습니다.\n다시 시도하세요."
+                )
+            
+            # 임시 파일 삭제
+            if os.path.exists(temp_audio_file):
+                os.remove(temp_audio_file)
+                
+        except ImportError:
+            self.update_status("❌ 음성 녹음 라이브러리 없음")
+            QMessageBox.warning(
+                self,
+                "라이브러리 오류",
+                "sounddevice 및 soundfile이 설치되어 있지 않습니다.\n설치 후 다시 시도하세요."
+            )
+        except Exception as e:
+            self.update_status(f"❌ 음성 녹음 오류: {str(e)}")
+            QMessageBox.warning(
+                self,
+                "녹음 오류",
+                f"음성 녹음 중 오류가 발생했습니다:\n{str(e)}"
+            )
+    
+    def gesture_register_mode(self):
+        """제스처 등록 모드"""
+        self.update_status("👋 제스처 등록 모드 활성화")
+        
+        # 제스처 타입 선택
+        gesture_types = ["OK", "Pointing_Up", "Thumbs_Down", "Thumbs_Up", "Victory", "Open_Palm", "Closed_Fist"]
+        
+        gesture_dialog = QInputDialog()
+        gesture_type, ok = gesture_dialog.getItem(
+            self,
+            "제스처 타입 선택",
+            "등록할 제스처를 선택하세요:",
+            gesture_types,
+            0,
+            False
+        )
+        
+        if not ok or not gesture_type:
+            self.update_status("❌ 제스처 타입 선택 취소됨")
+            return
+        
+        # 사용자 이름 입력
+        user_name, ok = QInputDialog.getText(
+            self,
+            "사용자 정보 입력",
+            "등록할 사용자의 이름을 입력하세요:"
+        )
+        
+        if not ok or not user_name.strip():
+            self.update_status("❌ 사용자 이름 입력 취소됨")
+            return
+        
+        user_name = user_name.strip()
+        
+        # 카메라에서 제스처 캡처
+        self.update_status(f"👋 {gesture_type} 제스처를 보여주세요... (카메라 확인)")
+        
+        # 3초 동안 프레임 캡처
+        capture_count = 0
+        max_captures = 5  # 5개 프레임 캡처
+        success_count = 0
+        
+        for i in range(90):  # 3초 (30fps * 3)
+            ret, frame = self.camera.read()
+            
+            if ret:
+                self.current_frame = frame
+                
+                # 매 18프레임마다 캡처 시도 (대략 0.6초 간격)
+                if i % 18 == 0 and capture_count < max_captures:
+                    if self.gesture_service.register_gesture(frame, gesture_type, user_name):
+                        success_count += 1
+                    capture_count += 1
+                
+                # UI 업데이트 (디스플레이만)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qt_image)
+                scaled_pixmap = pixmap.scaled(CAM_WIDTH, CAM_HEIGHT, Qt.KeepAspectRatio)
+                self.camera_label.setPixmap(scaled_pixmap)
+                
+                QApplication.processEvents()
+        
+        # 결과 처리
+        if success_count > 0:
+            self.gesture_service.save_gesture_data()
+            self.update_status(f"✅ {user_name}의 '{gesture_type}' 제스처 {success_count}개 등록 완료")
+            QMessageBox.information(
+                self,
+                "등록 완료",
+                f"{user_name}의 '{gesture_type}' 제스처 {success_count}개가 등록되었습니다."
+            )
+        else:
+            self.update_status("❌ 제스처 등록 실패 - 다시 시도하세요")
+            QMessageBox.warning(
+                self,
+                "등록 실패",
+                "제스처 등록 중 오류가 발생했습니다.\n제스처를 명확하게 보여주세요."
+            )
+    
+    def voice_recognize_mode(self):
+        """음성 인식 모드"""
+        self.update_status("🎤 음성 파일 선택 대기 중...")
+        
+        # 음성 파일 선택
+        audio_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "음성 파일 선택",
+            "",
+            "음성 파일 (*.wav *.mp3 *.flac);;모든 파일 (*)"
+        )
+        
+        if not audio_file:
+            self.update_status("❌ 음성 파일 선택 취소됨")
+            return
+        
+        # 음성 인식 실행
+        self.update_status(f"🎤 음성 인식 중... ({os.path.basename(audio_file)})")
+        
+        name, similarity = self.voice_service.recognize_voice(audio_file)
+        
+        if name != "Unknown" and similarity > self.voice_service.voice_similarity_threshold:
+            self.update_status(f"✅ {name} 인식됨 (유사도: {similarity:.3f})")
+            QMessageBox.information(
+                self,
+                "인식 성공",
+                f"음성 인식 완료:\n이름: {name}\n유사도: {similarity:.3f}"
+            )
+        else:
+            self.update_status("❌ 음성 인식 실패 - 등록된 사용자를 찾을 수 없습니다")
+            QMessageBox.warning(
+                self,
+                "인식 실패",
+                "등록된 사용자의 음성과 일치하지 않습니다."
+            )
     
     def closeEvent(self, event):
         """윈도우 종료 이벤트"""

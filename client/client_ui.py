@@ -7,13 +7,17 @@ import sys
 import cv2
 import os
 import pickle
+import time
 import numpy as np
+from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QMessageBox, QFrame
+    QVBoxLayout, QHBoxLayout, QMessageBox, QFrame, QFileDialog
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
+
+load_dotenv()
 
 # MediaPipe import
 MEDIAPIPE_AVAILABLE = False
@@ -35,6 +39,17 @@ try:
 except ImportError:
     print("⚠️  MediaPipe가 설치되지 않았습니다.")
 
+# SpeechBrain 음성 인식 모델 (옵션)
+SPEECHBRAIN_AVAILABLE = False
+try:
+    import torchaudio
+    from speechbrain.inference.speaker import EncoderClassifier
+    SPEECHBRAIN_AVAILABLE = True
+    print("✓ SpeechBrain 사용 가능")
+except Exception:
+    SPEECHBRAIN_AVAILABLE = False
+    print("ℹ️  SpeechBrain(음성 모델)을 사용할 수 없습니다.")
+
 # UI 설정 임포트
 from ui_config_lib import *
 
@@ -48,12 +63,31 @@ class ClientUI(QMainWindow):
         # 카메라 초기화
         self.camera = None
         self.current_frame = None
-        self.current_mode = None  # 'gesture', 'face', None
+        self.current_mode = None  # 'gesture', 'face', 'voice', None
         self.current_user = None
         
         # 얼굴 감지기 초기화
         self.face_detector = None
         self.gesture_recognizer = None
+        
+        # 얼굴 인식 설정
+        self.face_confidence_threshold = float(os.getenv('CONFIDENCE_THRESHOLD', 0.70))
+        self.face_similarity_threshold = float(os.getenv('FACE_SIMILARITY_THRESHOLD', 0.70))
+        
+        # 제스처 인식 설정
+        self.gesture_confidence_threshold = float(os.getenv('GESTURE_CONFIDENCE_THRESHOLD', 0.5))
+        self.gesture_cooldown = float(os.getenv('GESTURE_COOLDOWN', 3.0))
+        self.last_gesture_time = {}  # {gesture_type: timestamp}
+        self.detected_gestures = []  # 감지된 제스처 히스토리
+        
+        # 음성 인식 설정
+        self.voice_encoder = None
+        self.known_voice_embeddings = []
+        self.known_voice_names = []
+        self.voice_similarity_threshold = float(os.getenv('VOICE_SIMILARITY_THRESHOLD', 0.7))
+        self.voice_model_path = os.getenv('VOICE_MODEL_PATH', 'models/spkrec-ecapa-voxceleb')
+        self.last_voice_result = None  # 마지막 음성 인식 결과 (name, confidence)
+        self.voice_result_time = 0  # 마지막 음성 인식 시간
         
         if MEDIAPIPE_AVAILABLE and USE_TASK_API:
             try:
@@ -71,6 +105,20 @@ class ClientUI(QMainWindow):
             except Exception as e:
                 print(f"⚠️  MediaPipe 초기화 실패: {e}")
                 print("ℹ️  모델 파일을 확인하세요: models/blaze_face_short_range.tflite, models/gesture_recognizer.task")
+        
+        # 음성 인식 모델 초기화
+        if SPEECHBRAIN_AVAILABLE:
+            try:
+                # 모델은 최초 실행 시 Hugging Face에서 다운로드됩니다
+                self.voice_encoder = EncoderClassifier.from_hparams(
+                    source="speechbrain/spkrec-ecapa-voxceleb",
+                    savedir=self.voice_model_path
+                )
+                self.load_voice_data()
+                print("✓ 음성 인식 모델 초기화 성공")
+            except Exception as e:
+                print(f"⚠️  음성 인식 모델 초기화 실패: {e}")
+        
         
         # 얼굴인식 데이터 로드
         self.known_face_features = []
@@ -347,6 +395,99 @@ class ClientUI(QMainWindow):
         
         self.update_status("📹 카메라 활성화됨")
     
+    def load_voice_data(self):
+        """저장된 음성(임베딩) 데이터 로드"""
+        voice_data_file = "../data/voice/voice_embeddings.pkl"
+
+        if os.path.exists(voice_data_file):
+            try:
+                with open(voice_data_file, 'rb') as f:
+                    data = pickle.load(f)
+                    self.known_voice_embeddings = data.get('embeddings', [])
+                    self.known_voice_names = data.get('names', [])
+                print(f"✓ {len(self.known_voice_names)}명의 음성 데이터 로드됨")
+            except Exception as e:
+                print(f"⚠️  음성 데이터 로드 실패: {e}")
+        else:
+            print("ℹ️  등록된 음성 데이터가 없습니다.")
+    
+    def save_voice_data(self):
+        """음성 임베딩 저장"""
+        voice_data_file = "../data/voice/voice_embeddings.pkl"
+        os.makedirs(os.path.dirname(voice_data_file), exist_ok=True)
+
+        data = {
+            'embeddings': self.known_voice_embeddings,
+            'names': self.known_voice_names
+        }
+
+        try:
+            with open(voice_data_file, 'wb') as f:
+                pickle.dump(data, f)
+            print("✓ 음성 데이터 저장됨")
+        except Exception as e:
+            print(f"⚠️  음성 데이터 저장 실패: {e}")
+    
+    def extract_voice_embedding(self, audio_file):
+        """음성 파일에서 임베딩 추출"""
+        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
+            print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
+            return None
+        
+        try:
+            signal, sr = torchaudio.load(audio_file)
+            emb = self.voice_encoder.encode_batch(signal)
+            return emb.detach().cpu().numpy()
+        except Exception as e:
+            print(f"⚠️  음성 임베딩 추출 실패: {e}")
+            return None
+    
+    def recognize_voice(self, audio_file):
+        """음성 파일 인식"""
+        embedding = self.extract_voice_embedding(audio_file)
+        
+        if embedding is None:
+            return "Unknown", 0.0
+        
+        best_match_name = "Unknown"
+        best_similarity = 0.0
+        
+        # 저장된 음성과 비교
+        for known_emb, known_name in zip(self.known_voice_embeddings, self.known_voice_names):
+            similarity = self.cosine_similarity(embedding.flatten(), np.array(known_emb))
+            if similarity > best_similarity:
+                best_similarity = float(similarity)
+                best_match_name = known_name
+        
+        # 임계값 확인
+        if best_similarity < self.voice_similarity_threshold:
+            best_match_name = "Unknown"
+            best_similarity = 0.0
+        
+        return best_match_name, best_similarity
+    
+    def record_voice_and_extract(self, filename="./tmp_voice.wav", duration=3, fs=16000):
+        """음성 녹음 및 임베딩 추출 (placeholder)"""
+        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
+            print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
+            return None
+        try:
+            signal, sr = torchaudio.load(filename)
+            emb = self.voice_encoder.encode_batch(signal)
+            return emb.detach().cpu().numpy()
+        except Exception as e:
+            print(f"⚠️  음성 임베딩 추출 실패: {e}")
+            return None
+    
+    def process_voice_event(self, name, confidence):
+        """감지된 음성 처리"""
+        self.user_name_label.setText(f"이름: {name}")
+        self.attendance_status_label.setText(f"음성 인식됨 ({confidence:.1%})")
+        self.attendance_status_label.setStyleSheet(
+            f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+        )
+        print(f"📤 음성 이벤트: {name} ({confidence:.1%})")
+    
     def load_face_data(self):
         """저장된 얼굴 데이터 로드"""
         face_data_file = "../data/face_data.pkl"
@@ -425,9 +566,9 @@ class ClientUI(QMainWindow):
                         best_similarity = similarity
                         best_match_name = known_name
                 
-                # 유사도 임계값 (0.98 이상이면 같은 사람)
+                # 유사도 임계값 (설정값 이상이면 같은 사람)
                 confidence = best_similarity * 100
-                if confidence < 98:
+                if (best_similarity * 100) < (self.face_similarity_threshold * 100):
                     best_match_name = "Unknown"
                     confidence = 0
                 
@@ -477,6 +618,71 @@ class ClientUI(QMainWindow):
         
         return frame, recognized_names
     
+    def recognize_gesture(self, frame, skip_cooldown=False):
+        """프레임에서 제스처 인식 (Quality Gate 포함)
+        
+        Args:
+            frame: 입력 프레임
+            skip_cooldown: True일 경우 쿨다운 무시 (자동 인식 모드용)
+        """
+        if not MEDIAPIPE_AVAILABLE or not self.gesture_recognizer:
+            return [], frame
+        
+        try:
+            # MediaPipe Image 객체 생성
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = MPImage(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            
+            # 제스처 인식
+            result = self.gesture_recognizer.recognize(mp_image)
+            
+            detected_gestures = []
+            current_time = time.time()
+            
+            if hasattr(result, 'gestures') and result.gestures:
+                for gesture_list in result.gestures:
+                    if gesture_list:  # 제스처 리스트가 비어있지 않으면
+                        gesture = gesture_list[0]  # 가장 높은 신뢰도의 제스처
+                        gesture_name = gesture.category_name
+                        confidence = gesture.score
+                        
+                        # Quality Gate: 신뢰도 임계값 확인
+                        if confidence < self.gesture_confidence_threshold:
+                            continue
+                        
+                        # Cooldown 확인: 같은 제스처가 최근에 감지되었는가?
+                        # (자동 인식 모드에서는 cooldown 무시)
+                        if not skip_cooldown:
+                            if gesture_name in self.last_gesture_time:
+                                if current_time - self.last_gesture_time[gesture_name] < self.gesture_cooldown:
+                                    continue  # 쿨다운 중이면 무시
+                        
+                        # 유효한 제스처: 업데이트
+                        self.last_gesture_time[gesture_name] = current_time
+                        detected_gestures.append({
+                            'type': gesture_name,
+                            'confidence': confidence,
+                            'timestamp': current_time
+                        })
+                        
+                        print(f"✓ 제스처 인식: {gesture_name} ({confidence:.2f})")
+            
+            return detected_gestures, frame
+            
+        except Exception as e:
+            print(f"⚠️  제스처 인식 오류: {e}")
+            return [], frame
+    
+    def process_gesture_event(self, gesture_data):
+        """감지된 제스처 처리"""
+        gesture_type = gesture_data['type']
+        confidence = gesture_data['confidence']
+        
+        self.detected_gesture_label.setText(f"제스처: {gesture_type} ({confidence:.1%})")
+        
+        # ZeroMQ로 서버에 전송 (필요시)
+        print(f"📤 제스처 이벤트: {gesture_type} ({confidence:.1%})")
+    
     def update_frame(self):
         """카메라 프레임 업데이트"""
         ret, frame = self.camera.read()
@@ -485,30 +691,168 @@ class ClientUI(QMainWindow):
             self.current_frame = frame
             display_frame = frame.copy()
             
-            # 얼굴 인식 모드일 때 처리
+            # 얼굴 인식 모드
             if self.current_mode == "face_attendance":
                 display_frame, recognized_names = self.recognize_faces(display_frame)
                 
-                # 인식된 사람 정보 업데이트
                 if recognized_names:
-                    name, confidence = recognized_names[0]  # 첫 번째 인식된 사람
+                    name, confidence = recognized_names[0]
                     self.user_name_label.setText(f"이름: {name}")
                     self.attendance_status_label.setText(f"인식됨 ({confidence:.1f}%)")
                     self.attendance_status_label.setStyleSheet(
                         f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
                     )
                     
-                    # 자동 출석 처리 (confidence > 80%)
                     if confidence > 80:
                         self.detected_gesture_label.setText(f"✓ {name} 출석 확인")
                 else:
                     self.detected_gesture_label.setText("얼굴: 감지 안됨")
+            
+            # 제스처 인식 모드
+            elif self.current_mode == "gesture_attendance":
+                gestures, display_frame = self.recognize_gesture(display_frame)
+                
+                # 제스처 오버레이 표시
+                overlay_y = 30
+                if gestures:
+                    for gesture in gestures:
+                        self.process_gesture_event(gesture)
+                        gesture_type = gesture['type']
+                        confidence = gesture['confidence']
+                        
+                        gesture_text = f"Gesture: {gesture_type} ({confidence*100:.1f}%)"
+                        cv2.putText(display_frame, gesture_text, (10, overlay_y), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        overlay_y += 30
+                        
+                        self.attendance_status_label.setText(f"제스처 감지됨!")
+                        self.attendance_status_label.setStyleSheet(
+                            f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+                        )
+                else:
+                    cv2.putText(display_frame, "Gesture: Waiting...", (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
+                    self.attendance_status_label.setText("제스처 대기 중...")
+                    self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
+            
+            # 자동 인식 모드 (얼굴 + 제스처 + 음성 동시 인식)
+            elif self.current_mode == "automation":
+                display_frame, face_results = self.recognize_faces(display_frame)
+                # 자동 인식 모드에서는 제스처 쿨다운 무시
+                gestures, display_frame = self.recognize_gesture(display_frame, skip_cooldown=True)
+                
+                # Decision Fusion Logic: 얼굴 + 제스처 종합 판단
+                face_score = 0
+                face_name = "Unknown"
+                
+                if face_results:
+                    face_name, face_confidence = face_results[0]
+                    face_score = face_confidence / 100.0
+                
+                gesture_score = 0
+                gesture_detected = None
+                
+                if gestures:
+                    gesture_detected = gestures[0]['type']
+                    gesture_score = gestures[0]['confidence']
+                
+                # 통합 점수 계산 (얼굴 70%, 제스처 30%)
+                fusion_score = (face_score * 0.7) + (gesture_score * 0.3)
+                
+                # 동시 오버레이: 카메라 프레임에 실시간 표시
+                h, w, _ = display_frame.shape
+                
+                # 1. 얼굴 정보 오버레이
+                overlay_y = 30
+                if face_name != "Unknown":
+                    face_text = f"Face: {face_name} ({face_score*100:.1f}%)"
+                    cv2.putText(display_frame, face_text, (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    overlay_y += 30
+                else:
+                    cv2.putText(display_frame, "Face: Detecting...", (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                    overlay_y += 30
+                
+                # 2. 제스처 정보 오버레이
+                if gesture_detected:
+                    gesture_text = f"Gesture: {gesture_detected} ({gesture_score*100:.1f}%)"
+                    cv2.putText(display_frame, gesture_text, (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    overlay_y += 30
+                else:
+                    cv2.putText(display_frame, "Gesture: Waiting...", (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
+                    overlay_y += 30
+                
+                # 3. 음성 정보 오버레이 (최근 5초 이내 결과 표시)
+                current_time = time.time()
+                voice_name = "Unknown"
+                voice_score = 0.0
+                
+                if self.last_voice_result and (current_time - self.voice_result_time) < 5.0:
+                    voice_name, voice_score = self.last_voice_result
+                    voice_text = f"Voice: {voice_name} ({voice_score:.2f})"
+                    cv2.putText(display_frame, voice_text, (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                else:
+                    cv2.putText(display_frame, "Voice: Press V key", (10, overlay_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
+                overlay_y += 30
+                
+                # 4. 종합 점수 오버레이 (얼굴 50%, 제스처 25%, 음성 25%)
+                fusion_score = (face_score * 0.5) + (gesture_score * 0.25) + (voice_score * 0.25)
+                fusion_text = f"Fusion Score: {fusion_score*100:.1f}%"
+                cv2.putText(display_frame, fusion_text, (10, overlay_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                
+                # 자동 인식 기준: 얼굴 인식률 > 70% 또는 (얼굴 > 50% AND 제스처 감지)
+                if face_name != "Unknown" and face_score > 0.7:
+                    # 얼굴 인식 성공
+                    self.user_name_label.setText(f"이름: {face_name}")
+                    self.attendance_status_label.setText(f"✓ {face_name} 인식됨 ({face_score*100:.1f}%)")
+                    self.attendance_status_label.setStyleSheet(
+                        f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+                    )
+                    
+                    status_msg = f"✓ {face_name} - 얼굴: {face_score*100:.1f}%"
+                    if gesture_detected:
+                        status_msg += f" + 제스처: {gesture_detected}"
+                    self.detected_gesture_label.setText(status_msg)
+                    
+                elif face_name != "Unknown" and face_score > 0.5 and gesture_detected:
+                    # 얼굴 + 제스처 조합으로 인식
+                    self.user_name_label.setText(f"이름: {face_name}")
+                    self.attendance_status_label.setText(f"✓ 다중 모달 인식 ({fusion_score*100:.1f}%)")
+                    self.attendance_status_label.setStyleSheet(
+                        f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+                    )
+                    self.detected_gesture_label.setText(f"얼굴: {face_score*100:.1f}% + 제스처: {gesture_detected}")
+                else:
+                    # 대기
+                    self.attendance_status_label.setText("자동 인식 중...")
+                    self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
+                    
+                    status_msg = ""
+                    if face_name != "Unknown":
+                        status_msg = f"얼굴: {face_score*100:.1f}%"
+                    if gesture_detected:
+                        if status_msg:
+                            status_msg += f" + 제스처: {gesture_detected}"
+                        else:
+                            status_msg = f"제스처: {gesture_detected}"
+                    
+                    if status_msg:
+                        self.detected_gesture_label.setText(status_msg)
+                    else:
+                        self.detected_gesture_label.setText("대기 중...")
             
             # 모드 표시
             if self.current_mode:
                 mode_text = {
                     "gesture_attendance": "제스처 출석 모드",
                     "face_attendance": "얼굴 인식 모드",
+                    "automation": "🧠 자동 인식 모드 (얼굴+제스처+음성)",
                 }
                 cv2.putText(display_frame, mode_text.get(self.current_mode, ""), 
                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -540,6 +884,49 @@ class ClientUI(QMainWindow):
             self.attendance_status_label.setText("얼굴 인식 중...")
             self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
             
+        elif mode_name == "voice_attendance":
+            self.update_status("🎤 음성 인식 출석 모드 활성화")
+            self.attendance_status_label.setText("음성 파일 선택 대기 중...")
+            self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
+            
+            # 음성 파일 선택 다이얼로그 열기
+            audio_file, _ = QFileDialog.getOpenFileName(
+                self,
+                "음성 파일 선택",
+                "",
+                "음성 파일 (*.wav *.mp3 *.flac);;모든 파일 (*)"
+            )
+            
+            if audio_file:
+                self.update_status(f"🎤 음성 인식 중... ({os.path.basename(audio_file)})")
+                self.attendance_status_label.setText("인식 중...")
+                
+                # 음성 인식 실행
+                name, confidence = self.recognize_voice(audio_file)
+                
+                if name != "Unknown" and confidence > self.voice_similarity_threshold:
+                    self.user_name_label.setText(f"이름: {name}")
+                    self.attendance_status_label.setText(f"음성 인식됨 ({confidence:.2f})")
+                    self.attendance_status_label.setStyleSheet(
+                        f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+                    )
+                    self.update_status(f"✅ {name} 음성 인식 성공")
+                    self.process_voice_event(name, confidence)
+                else:
+                    self.attendance_status_label.setText("음성 인식 실패")
+                    self.attendance_status_label.setStyleSheet(
+                        f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;"
+                    )
+                    self.update_status("❌ 음성 인식 실패 - 다시 시도하세요")
+            else:
+                self.current_mode = None
+                self.update_status("❌ 음성 파일 선택 취소됨")
+            
+        elif mode_name == "automation":
+            self.update_status("🧠 자동 인식 모드 활성화 (얼굴+제스처+음성)")
+            self.attendance_status_label.setText("자동 인식 중...")
+            self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
+            
         elif mode_name == "attendance_status":
             self.update_status("📊 출석 현황 조회")
             QMessageBox.information(self, "출석 현황", "출석 현황 조회 기능입니다.")
@@ -547,6 +934,45 @@ class ClientUI(QMainWindow):
     def update_status(self, message):
         """상태바 업데이트"""
         self.status_bar.setText(message)
+    
+    def keyPressEvent(self, event):
+        """키보드 이벤트 핸들러"""
+        from PyQt5.QtCore import Qt
+        
+        # 자동화 모드에서 V 키를 누르면 음성 인식
+        if self.current_mode == "automation" and event.key() == Qt.Key_V:
+            self.trigger_voice_recognition()
+        
+        super().keyPressEvent(event)
+    
+    def trigger_voice_recognition(self):
+        """음성 인식 트리거 (자동화 모드용)"""
+        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
+            self.update_status("⚠️  음성 인식 모델이 준비되지 않았습니다")
+            return
+        
+        # 음성 파일 선택
+        audio_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "음성 파일 선택",
+            "",
+            "음성 파일 (*.wav *.mp3 *.flac);;모든 파일 (*)"
+        )
+        
+        if audio_file:
+            self.update_status(f"🎤 음성 인식 중... ({os.path.basename(audio_file)})")
+            
+            # 음성 인식 실행
+            name, confidence = self.recognize_voice(audio_file)
+            
+            if name != "Unknown" and confidence > self.voice_similarity_threshold:
+                # 음성 인식 결과 저장 (5초간 유지)
+                self.last_voice_result = (name, confidence)
+                self.voice_result_time = time.time()
+                self.update_status(f"✅ 음성 인식 성공: {name} ({confidence:.2f})")
+            else:
+                self.last_voice_result = None
+                self.update_status("❌ 음성 인식 실패")
     
     def closeEvent(self, event):
         """윈도우 종료 이벤트"""
