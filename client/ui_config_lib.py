@@ -36,7 +36,6 @@ LEFT_BUTTON_FONT_SIZE = 12
 LEFT_BUTTONS = [
     {"text": "😊 얼굴 인식 출석", "name": "face_attendance"},
     {"text": "✋ 제스처 출석", "name": "gesture_attendance"},
-    {"text": "📢 음성 출석", "name": "voice_attendance"},
     {"text": "📊 출석 현황", "name": "attendance_status"},
 ]
 

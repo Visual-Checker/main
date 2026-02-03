@@ -8,7 +8,3 @@ Pillow>=10.0.0
 PyQt5>=5.15.9
 pyzmq>=25.1.0
 protobuf>=4.25.0
-# Optional: speech recognition / speaker verification
-speechbrain @ git+https://github.com/speechbrain/speechbrain.git@develop
-torchaudio
-# Note: install torch explicitly for your platform (CPU/CUDA) before torchaudio if needed

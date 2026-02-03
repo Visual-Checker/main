@@ -1,6 +1,6 @@
 """
 클라이언트 UI - 출결관리 시스템
-제스처 및 얼굴 인식 출석 체크 (PyQt5 기반)
+제스처 및 얼굴 인식 출석 체크
 """
 
 import sys
@@ -8,7 +8,6 @@ import cv2
 import os
 import pickle
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QMessageBox, QFrame
@@ -18,7 +17,6 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
 # MediaPipe import
 MEDIAPIPE_AVAILABLE = False
-USE_TASK_API = False
 try:
     import mediapipe as mp
     # Task API import 시도
@@ -29,7 +27,7 @@ try:
         MEDIAPIPE_AVAILABLE = True
         USE_TASK_API = True
         print("✓ MediaPipe Task API 사용 가능")
-    except Exception:
+    except:
         # Task API 없으면 OpenCV만 사용
         USE_TASK_API = False
         MEDIAPIPE_AVAILABLE = False
@@ -37,53 +35,8 @@ try:
 except ImportError:
     print("⚠️  MediaPipe가 설치되지 않았습니다.")
 
-# SpeechBrain 음성 인식 모델 (옵션)
-SPEECHBRAIN_AVAILABLE = False
-try:
-    import torchaudio
-    from speechbrain.inference.speaker import EncoderClassifier
-    SPEECHBRAIN_AVAILABLE = True
-    print("✓ SpeechBrain 사용 가능")
-except Exception:
-    SPEECHBRAIN_AVAILABLE = False
-    print("ℹ️  SpeechBrain(음성 모델)을 사용할 수 없습니다.")
-
 # UI 설정 임포트
 from ui_config_lib import *
-
-
-def put_korean_text(img, text, position, font_size=20, color=(255, 255, 255)):
-    """PIL을 사용하여 한글 텍스트를 이미지에 렌더링."""
-    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img_pil)
-
-    font = None
-    # 후보 경로들
-    candidates = []
-    if os.name == 'nt':
-        candidates += [r"C:\Windows\Fonts\malgun.ttf", r"C:\Windows\Fonts\gulim.ttc"]
-    candidates += ["/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"]
-    candidates += [os.path.join(os.getcwd(), "fonts", "NanumGothic.ttf"), os.path.join(os.getcwd(), "fonts", "NotoSansCJK-Regular.ttc")]
-
-    for path in candidates:
-        try:
-            if path and os.path.exists(path):
-                font = ImageFont.truetype(path, font_size)
-                break
-        except Exception:
-            continue
-
-    if font is None:
-        try:
-            font = ImageFont.truetype("malgun.ttf", font_size)
-        except Exception:
-            try:
-                font = ImageFont.truetype("NanumGothic.ttf", font_size)
-            except Exception:
-                font = ImageFont.load_default()
-
-    draw.text(position, text, font=font, fill=color)
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
 
 class ClientUI(QMainWindow):
@@ -105,12 +58,12 @@ class ClientUI(QMainWindow):
         if MEDIAPIPE_AVAILABLE and USE_TASK_API:
             try:
                 # 얼굴 감지기
-                base_options_face = python.BaseOptions(model_asset_path='../models/blaze_face_short_range.tflite')
+                base_options_face = python.BaseOptions(model_asset_path='models/blaze_face_short_range.tflite')
                 face_options = vision.FaceDetectorOptions(base_options=base_options_face)
                 self.face_detector = vision.FaceDetector.create_from_options(face_options)
                 
                 # 제스처 인식기
-                base_options_gesture = python.BaseOptions(model_asset_path='../models/gesture_recognizer.task')
+                base_options_gesture = python.BaseOptions(model_asset_path='models/gesture_recognizer.task')
                 gesture_options = vision.GestureRecognizerOptions(base_options=base_options_gesture)
                 self.gesture_recognizer = vision.GestureRecognizer.create_from_options(gesture_options)
                 
@@ -119,29 +72,14 @@ class ClientUI(QMainWindow):
                 print(f"⚠️  MediaPipe 초기화 실패: {e}")
                 print("ℹ️  모델 파일을 확인하세요: models/blaze_face_short_range.tflite, models/gesture_recognizer.task")
         
-        # 얼굴인식 데이터 로드 (name -> samples 딕셔너리)
-        self.known_face_db = {}
+        # 얼굴인식 데이터 로드
+        self.known_face_features = []
+        self.known_face_names = []
         self.load_face_data()
-
-        # 음성 인식 준비 (옵션)
-        self.voice_encoder = None
-        self.known_voice_embeddings = []
-        self.known_voice_names = []
-        if SPEECHBRAIN_AVAILABLE:
-            try:
-                # 모델은 최초 실행 시 Hugging Face에서 다운로드됩니다
-                self.voice_encoder = EncoderClassifier.from_hparams(
-                    source="speechbrain/spkrec-ecapa-voxceleb",
-                    savedir="../models/spkrec-ecapa-voxceleb"
-                )
-                self.load_voice_data()
-                print("✓ 음성 인식 모델 초기화 성공")
-            except Exception as e:
-                print(f"⚠️  음성 인식 모델 초기화 실패: {e}")
-
+        
         # UI 초기화
         self.init_ui()
-
+        
         # 카메라 시작
         self.start_camera()
         
@@ -410,65 +348,24 @@ class ClientUI(QMainWindow):
         self.update_status("📹 카메라 활성화됨")
     
     def load_face_data(self):
-        """저장된 얼굴 데이터 로드 (face_db dict expected)"""
+        """저장된 얼굴 데이터 로드"""
         face_data_file = "../data/face_data.pkl"
-        self.known_face_db = {}
-
+        
         if os.path.exists(face_data_file):
             try:
                 with open(face_data_file, 'rb') as f:
                     data = pickle.load(f)
-                    if 'face_db' in data:
-                        self.known_face_db = data.get('face_db', {})
-                    else:
-                        # legacy format
-                        features = data.get('features', [])
-                        names = data.get('names', [])
-                        for feat, name in zip(features, names):
-                            self.known_face_db.setdefault(name, []).append(feat)
-                total_people = len(self.known_face_db)
-                total_samples = sum(len(v) for v in self.known_face_db.values())
-                print(f"✓ {total_people}명의 얼굴 데이터 로드됨, 총 샘플 {total_samples}개")
+                    self.known_face_features = data.get('features', [])
+                    self.known_face_names = data.get('names', [])
+                print(f"✓ {len(self.known_face_names)}명의 얼굴 데이터 로드됨")
             except Exception as e:
                 print(f"⚠️  얼굴 데이터 로드 실패: {e}")
         else:
             print("ℹ️  등록된 얼굴 데이터가 없습니다.")
-
-    def load_voice_data(self):
-        """저장된 음성(임베딩) 데이터 로드"""
-        voice_data_file = "../data/voice_data.pkl"
-
-        if os.path.exists(voice_data_file):
-            try:
-                with open(voice_data_file, 'rb') as f:
-                    data = pickle.load(f)
-                    self.known_voice_embeddings = data.get('embeddings', [])
-                    self.known_voice_names = data.get('names', [])
-                print(f"✓ {len(self.known_voice_names)}명의 음성 데이터 로드됨")
-            except Exception as e:
-                print(f"⚠️  음성 데이터 로드 실패: {e}")
-        else:
-            print("ℹ️  등록된 음성 데이터가 없습니다.")
-
-    def save_voice_data(self):
-        """음성 임베딩 저장"""
-        voice_data_file = "../data/voice_data.pkl"
-        os.makedirs(os.path.dirname(voice_data_file), exist_ok=True)
-
-        data = {
-            'embeddings': self.known_voice_embeddings,
-            'names': self.known_voice_names
-        }
-
-        try:
-            with open(voice_data_file, 'wb') as f:
-                pickle.dump(data, f)
-            print("✓ 음성 데이터 저장됨")
-        except Exception as e:
-            print(f"⚠️  음성 데이터 저장 실패: {e}")
     
     def extract_face_features(self, detection, image_width, image_height):
         """얼굴 감지 결과에서 특징 벡터 추출"""
+        # 바운딩 박스 좌표를 특징으로 사용
         bbox = detection.bounding_box
         features = [
             bbox.origin_x / image_width,
@@ -495,63 +392,59 @@ class ClientUI(QMainWindow):
             # MediaPipe가 없으면 OpenCV Haar Cascade 사용
             return self.recognize_faces_opencv(frame)
         
+        # MediaPipe Image 객체 생성
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb_frame = np.ascontiguousarray(rgb_frame, dtype=np.uint8)
-
-        detection_result = None
-        try:
-            mp_image = MPImage(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            detection_result = self.face_detector.detect(mp_image)
-        except Exception as e:
-            try:
-                mp_image = MPImage(image_format=mp.ImageFormat.SRGB, data=rgb_frame.tobytes())
-                detection_result = self.face_detector.detect(mp_image)
-            except Exception as e2:
-                print(f"⚠️ MediaPipe detection error (skipping this frame): {e2}")
-                detection_result = None
+        mp_image = MPImage(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        
+        # 얼굴 감지
+        detection_result = self.face_detector.detect(mp_image)
         
         recognized_names = []
         h, w, _ = frame.shape
         
         if detection_result.detections:
             for detection in detection_result.detections:
+                # 바운딩 박스 추출
                 bbox = detection.bounding_box
                 x_min = int(bbox.origin_x)
                 y_min = int(bbox.origin_y)
                 x_max = int(bbox.origin_x + bbox.width)
                 y_max = int(bbox.origin_y + bbox.height)
                 
+                # 얼굴 특징 추출
                 current_features = self.extract_face_features(detection, w, h)
                 
+                # 등록된 얼굴과 비교
                 best_match_name = "Unknown"
                 best_similarity = 0
-
-                for known_name, samples in self.known_face_db.items():
-                    max_sim = 0
-                    for known_features in samples:
-                        sim = self.cosine_similarity(current_features, np.array(known_features))
-                        if sim > max_sim:
-                            max_sim = sim
-                    if max_sim > best_similarity:
-                        best_similarity = max_sim
+                
+                for known_features, known_name in zip(self.known_face_features, self.known_face_names):
+                    similarity = self.cosine_similarity(current_features, known_features)
+                    
+                    if similarity > best_similarity:
+                        best_similarity = similarity
                         best_match_name = known_name
-
+                
+                # 유사도 임계값 (0.98 이상이면 같은 사람)
                 confidence = best_similarity * 100
                 if confidence < 98:
                     best_match_name = "Unknown"
                     confidence = 0
-
+                
                 if best_match_name != "Unknown":
                     recognized_names.append((best_match_name, confidence))
                 
+                # 얼굴 박스 그리기
                 color = (0, 255, 0) if best_match_name != "Unknown" else (0, 0, 255)
                 cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)
                 
+                # 키포인트 그리기 (눈, 코, 입 등)
                 for keypoint in detection.keypoints:
                     kp_x = int(keypoint.x * w)
                     kp_y = int(keypoint.y * h)
                     cv2.circle(frame, (kp_x, kp_y), 2, (0, 255, 255), -1)
                 
+                # 이름과 신뢰도 표시
                 label_height = 40
                 cv2.rectangle(frame, (x_min, y_max), (x_max, y_max + label_height), color, cv2.FILLED)
                 
@@ -570,48 +463,20 @@ class ClientUI(QMainWindow):
         """폴백: OpenCV Haar Cascade로 얼굴 감지"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
+        # Haar Cascade 불러오기
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
         
         recognized_names = []
         
         for (x, y, w, h) in faces:
+            # 바운딩 박스 그리기
             cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            frame = put_korean_text(frame, "얼굴 감지됨", (x, y-10), 18, (0, 255, 0))
+            cv2.putText(frame, "Face Detected", (x, y-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         return frame, recognized_names
-
-    def recognize_gesture(self, frame):
-        """제스처 인식 (MediaPipe Task API 기반 또는 폴백)"""
-        if MEDIAPIPE_AVAILABLE and hasattr(self, 'gesture_recognizer') and self.gesture_recognizer:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = MPImage(image_format=mp.ImageFormat.SRGB, data=rgb)
-            try:
-                result = self.gesture_recognizer.recognize(mp_image)
-                gestures = []
-                if hasattr(result, 'gestures') and result.gestures:
-                    for g in result.gestures:
-                        gestures.append(g[0].category_name)
-                return gestures
-            except Exception as e:
-                print(f"⚠️  제스처 인식 실패: {e}")
-                return []
-        else:
-            return []
-
-    def record_voice_and_extract(self, filename="./tmp_voice.wav", duration=3, fs=16000):
-        """음성 녹음(간단한 placeholder)"""
-        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
-            print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
-            return None
-        try:
-            signal, sr = torchaudio.load(filename)
-            emb = self.voice_encoder.encode_batch(signal)
-            return emb.detach().cpu().numpy()
-        except Exception as e:
-            print(f"⚠️  음성 임베딩 추출 실패: {e}")
-            return None
-
+    
     def update_frame(self):
         """카메라 프레임 업데이트"""
         ret, frame = self.camera.read()
@@ -620,9 +485,11 @@ class ClientUI(QMainWindow):
             self.current_frame = frame
             display_frame = frame.copy()
             
+            # 얼굴 인식 모드일 때 처리
             if self.current_mode == "face_attendance":
                 display_frame, recognized_names = self.recognize_faces(display_frame)
                 
+                # 인식된 사람 정보 업데이트
                 if recognized_names:
                     name, confidence = recognized_names[0]  # 첫 번째 인식된 사람
                     self.user_name_label.setText(f"이름: {name}")
@@ -633,19 +500,11 @@ class ClientUI(QMainWindow):
                     
                     # 자동 출석 처리 (confidence > 80%)
                     if confidence > 80:
-                        # 여기에 출석 기록 로직 추가 가능
-                        pass
-            elif self.current_mode == "gesture_attendance":
-                gestures = self.recognize_gesture(display_frame)
-                if gestures:
-                    gtext = gestures[0]
-                    display_frame = put_korean_text(display_frame, f"제스처: {gtext}", (10, 30), 20, (255, 255, 255))
-                    self.attendance_status_label.setText(f"제스처 인식: {gtext}")
+                        self.detected_gesture_label.setText(f"✓ {name} 출석 확인")
                 else:
-                    self.attendance_status_label.setText("제스처 대기 중...")
-            elif self.current_mode == "voice_attendance":
-                self.attendance_status_label.setText("음성 입력 대기 (파일 기반)")
+                    self.detected_gesture_label.setText("얼굴: 감지 안됨")
             
+            # 모드 표시
             if self.current_mode:
                 mode_text = {
                     "gesture_attendance": "제스처 출석 모드",
@@ -654,28 +513,18 @@ class ClientUI(QMainWindow):
                 cv2.putText(display_frame, mode_text.get(self.current_mode, ""), 
                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            rgb_for_qt = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-            rgb_for_qt = np.ascontiguousarray(rgb_for_qt, dtype=np.uint8)
-            h, w, ch = rgb_for_qt.shape
+            # BGR을 RGB로 변환
+            rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            
+            # QImage로 변환
+            h, w, ch = rgb_frame.shape
             bytes_per_line = ch * w
-            try:
-                qt_image = QImage(rgb_for_qt.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                if qt_image.isNull():
-                    raise ValueError("QImage is null")
-            except Exception as e:
-                print(f"⚠️ QImage creation failed, downscaling for stability: {e}")
-                small = cv2.resize(rgb_for_qt, (min(w, 320), int(h * (min(w, 320) / w))))
-                small = np.ascontiguousarray(small, dtype=np.uint8)
-                h2, w2, ch2 = small.shape
-                bytes_per_line2 = ch2 * w2
-                qt_image = QImage(small.data, w2, h2, bytes_per_line2, QImage.Format_RGB888)
-
-            try:
-                pixmap = QPixmap.fromImage(qt_image)
-                scaled_pixmap = pixmap.scaled(CAM_WIDTH, CAM_HEIGHT, Qt.KeepAspectRatio)
-                self.camera_label.setPixmap(scaled_pixmap)
-            except Exception as e:
-                print(f"⚠️ Pixmap update failed: {e}")
+            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            # QLabel에 표시
+            pixmap = QPixmap.fromImage(qt_image)
+            scaled_pixmap = pixmap.scaled(CAM_WIDTH, CAM_HEIGHT, Qt.KeepAspectRatio)
+            self.camera_label.setPixmap(scaled_pixmap)
     
     def on_mode_button_click(self, mode_name):
         """모드 버튼 클릭 이벤트"""
@@ -690,15 +539,6 @@ class ClientUI(QMainWindow):
             self.update_status("😊 얼굴 인식 출석 모드 활성화")
             self.attendance_status_label.setText("얼굴 인식 중...")
             self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
-
-        elif mode_name == "voice_attendance":
-            self.update_status("📢 음성 인식 모드 활성화")
-            if SPEECHBRAIN_AVAILABLE and self.voice_encoder:
-                self.attendance_status_label.setText("음성 입력 대기 (파일 기반)")
-                self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
-                QMessageBox.information(self, "음성 인식", "녹음된 WAV 파일을 준비한 뒤 '음성 인식' 버튼(임시)을 누르세요.")
-            else:
-                QMessageBox.warning(self, "음성 인식", "SpeechBrain이 설치되어 있지 않거나 모델 초기화에 실패했습니다.")
             
         elif mode_name == "attendance_status":
             self.update_status("📊 출석 현황 조회")
