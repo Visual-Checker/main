@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>학생 관리</title>
+    <style>body{font-family:Segoe UI,Arial;background:#f5f5f5;padding:30px;} .card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08);} table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #eee}</style>
+</head>
+<body>
+    <h1>학생 관리</h1>
+    <div class="card">
+        <p>학생 목록 및 등록/수정 기능 (예시)</p>
+        <table>
+            <thead><tr><th>ID</th><th>이름</th><th>상태</th></tr></thead>
+            <tbody id="students-body"></tbody>
+        </table>
+    </div>
+    <script>
+        async function loadStudents(){
+            const res = await fetch('/admin/api/students');
+            const data = await res.json();
+            const tbody = document.getElementById('students-body');
+            tbody.innerHTML = '';
+            data.forEach(s => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${s.id}</td><td>${s.name}</td><td>${s.status}</td>`; tbody.appendChild(tr); });
+        }
+        loadStudents();
+    </script>
+</body>
+</html>

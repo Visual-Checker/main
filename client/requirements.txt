@@ -1,0 +1,14 @@
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+Pillow>=10.0.0
+PyQt5>=5.15.9
+pyzmq>=25.1.0
+protobuf>=4.25.0
+# Optional: speech recognition / speaker verification
+speechbrain @ git+https://github.com/speechbrain/speechbrain.git@develop
+torchaudio
+# Note: install torch explicitly for your platform (CPU/CUDA) before torchaudio if needed

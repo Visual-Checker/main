@@ -1,0 +1,63 @@
+version: "3.8"
+
+services:
+  db:
+    build:
+      context: ./postgres
+    image: miniproject-db:15-pgvector
+    env_file:
+      - .env.docker
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-example}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./docker-initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build: .
+    image: miniproject-web:latest
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-example}@db:5432/appdb
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+    volumes:
+      - .:/app:cached
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+  redis_data:
