@@ -1,8 +1,11 @@
 from flask import Flask, redirect, url_for
 from dotenv import load_dotenv
 import os
+import logfire
 
 load_dotenv()
+
+logfire.configure(send_to_logfire=False)
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key')

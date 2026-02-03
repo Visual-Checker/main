@@ -54,19 +54,20 @@
         </div>
         <div class="nav-tabs">
             <a href="/admin" class="active">대시보드</a>
-            <a href="/admin/realtime">실시간 모니터</a>
-            <a href="/admin/students">학생 관리</a>
-            <a href="/admin/reports">보고서</a>
+            <a href="realtime.html">실시간 모니터</a>
+            <a href="students.html">학생 관리</a>
+            <a href="reports.html">보고서</a>
+            <a href="pydantic_logs.html">Pydantic 로그</a>
         </div>
         <div class="content-section">
             <h2>최근 출석 이벤트</h2>
             <table id="events-table">
                 <thead>
                     <tr>
-                        <th>학생 ID</th>
+                        <th>얼굴인식</th>
                         <th>제스처</th>
-                        <th>신뢰도</th>
-                        <th>시간</th>
+                        <th>음성인식</th>
+                        <th>입실/퇴실</th>
                         <th>상태</th>
                     </tr>
                 </thead>
@@ -96,11 +97,11 @@
                 events.slice(0, 20).forEach(event => {
                     const row = tbody.insertRow();
                     row.innerHTML = `
-                        <td>${event.student_id}</td>
-                        <td>${event.gesture}</td>
-                        <td>${(event.confidence * 100).toFixed(1)}%</td>
-                        <td>${new Date(event.timestamp * 1000).toLocaleString()}</td>
-                        <td><span class="status-badge status-${event.status}">${event.status}</span></td>
+                        <td>${event.face ?? '-'}</td>
+                        <td>${event.gesture ?? '-'}</td>
+                        <td>${event.voice ?? '-'}</td>
+                        <td>${event.check_type ?? '-'}</td>
+                        <td><span class="status-badge status-${event.status || 'absent'}">${event.status ?? '-'}</span></td>
                     `;
                 });
             } catch (error) { console.error('Error fetching events:', error); }
