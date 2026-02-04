@@ -16,14 +16,14 @@ switch ($choice.ToUpper()) {
         Start-Process -FilePath "powershell" -ArgumentList @(
             "-NoExit",
             "-Command",
-            "conda activate p13_mini_test; Set-Location `"$clientPath`"; python python_src/client_ui.py"
+            "conda activate p13_MiniProject; Set-Location `"$clientPath`"; python python_src/client_ui.py"
         )
     }
     "2" {
         Start-Process -FilePath "powershell" -ArgumentList @(
             "-NoExit",
             "-Command",
-            "conda activate p13_mini_test; Set-Location `"$adminPath`"; python src/admin_ui.py"
+            "conda activate p13_MiniProject; Set-Location `"$adminPath`"; python src/admin_ui.py"
         )
     }
     "Q" {

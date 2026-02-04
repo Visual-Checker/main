@@ -8,6 +8,7 @@ from scipy.signal import resample
 from pathlib import Path
 import sys
 from dotenv import load_dotenv
+from speechbrain.pretrained import EncoderClassifier
 # 경고 무시
 warnings.filterwarnings("ignore")
 os.environ['TORCHAUDIO_USE_SOX_EFFECTS'] = '0'
@@ -54,7 +55,7 @@ DURATION = 4  # seconds per recognition chunk
 
 print("모델 로딩 중...")
 try:
-    from speechbrain.pretrained import EncoderClassifier
+    
     classifier = EncoderClassifier.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir="pretrained_models/ecapa"

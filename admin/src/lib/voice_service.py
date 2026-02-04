@@ -5,6 +5,7 @@ Admin 음성 인식 서비스
 import os
 import pickle
 import numpy as np
+import torch
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,6 +13,24 @@ load_dotenv()
 SPEECHBRAIN_AVAILABLE = False
 try:
     import torchaudio
+
+    # torchaudio backend 체크 무력화 (Windows/환경 이슈 대응)
+    def _noop(*args, **kwargs):
+        return None
+
+    # list_audio_backends가 없는 버전 대응
+    if not hasattr(torchaudio, "list_audio_backends"):
+        torchaudio.list_audio_backends = lambda: []
+
+    # 백엔드 설정 함수 무력화
+    if hasattr(torchaudio, "set_audio_backend"):
+        torchaudio.set_audio_backend = _noop
+    if hasattr(torchaudio, "backend") and hasattr(torchaudio.backend, "utils"):
+        if hasattr(torchaudio.backend.utils, "set_audio_backend"):
+            torchaudio.backend.utils.set_audio_backend = _noop
+    if hasattr(torchaudio, "utils") and hasattr(torchaudio.utils, "check_torchaudio_backend"):
+        torchaudio.utils.check_torchaudio_backend = _noop
+
     from speechbrain.inference.speaker import EncoderClassifier
     SPEECHBRAIN_AVAILABLE = True
 except Exception:
@@ -32,19 +51,74 @@ class VoiceService:
         self.known_voice_names = []
         self.voice_similarity_threshold = float(os.getenv('VOICE_SIMILARITY_THRESHOLD', 0.7))
         self.model_path = model_path or os.getenv('VOICE_MODEL_PATH', './models/spkrec-ecapa-voxceleb')
-        # 음성 데이터를 data/voice 폴더에 저장
-        self.voice_data_file = voice_data_file or os.getenv('VOICE_DATA_FILE', './data/voice/voice_embeddings.pkl')
+        # 음성 데이터를 main/data/voice 폴더에 저장
+        default_voice_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'voice', 'voice_embeddings.pkl')
+        )
+        self.voice_data_file = voice_data_file or os.getenv('VOICE_DATA_FILE', default_voice_path)
+        self._model_loaded = False
+        self._model_loading_error = None
         
-        if SPEECHBRAIN_AVAILABLE:
+        # 모델을 즉시 로드하지 않음 (지연 로딩)
+        print("✓ 음성 인식 서비스 초기화 (모델은 첫 사용 시 로드됩니다)")
+    
+    def is_ready(self):
+        """모델이 준비되었는지 확인"""
+        return SPEECHBRAIN_AVAILABLE and self._model_loaded and self.voice_encoder is not None
+    
+    def ensure_model_loaded(self):
+        """모델이 로드되지 않았다면 로드"""
+        if not SPEECHBRAIN_AVAILABLE:
+            self._model_loading_error = "SpeechBrain이 설치되지 않았습니다."
+            return False
+        
+        if self._model_loaded:
+            return True
+        
+        try:
+            print("🔄 SpeechBrain ECAPA-TDNN 모델 로딩 중...")
+
+            # Windows symlink 권한 문제 회피 (symlink 대신 복사)
+            from pathlib import Path
+            original_symlink_to = Path.symlink_to
+
+            def _patched_symlink_to(self, target, target_is_directory=False):
+                import shutil
+                target = Path(target)
+                self.parent.mkdir(parents=True, exist_ok=True)
+                if target.is_file():
+                    shutil.copy2(target, self)
+                elif target.is_dir():
+                    if self.exists():
+                        shutil.rmtree(self)
+                    shutil.copytree(target, self)
+
+            Path.symlink_to = _patched_symlink_to
+
             try:
                 self.voice_encoder = EncoderClassifier.from_hparams(
                     source="speechbrain/spkrec-ecapa-voxceleb",
                     savedir=self.model_path
                 )
-                self.load_voice_data()
-                print("✓ 음성 인식 서비스 초기화 성공")
-            except Exception as e:
-                print(f"⚠️  음성 인식 서비스 초기화 실패: {e}")
+            finally:
+                Path.symlink_to = original_symlink_to
+
+            self.load_voice_data()
+            self._model_loaded = True
+            print("✓ 음성 인식 모델 로드 완료")
+            return True
+        except Exception as e:
+            self._model_loading_error = str(e)
+            print(f"⚠️  음성 인식 모델 로드 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def get_error_message(self):
+        """모델 로딩 에러 메시지 반환"""
+        if not SPEECHBRAIN_AVAILABLE:
+            return "SpeechBrain이 설치되지 않았습니다. 'pip install speechbrain'을 실행하세요."
+        return self._model_loading_error or "알 수 없는 오류"
     
     def load_voice_data(self):
         """저장된 음성 데이터 로드"""
@@ -79,18 +153,28 @@ class VoiceService:
     
     def extract_voice_embedding(self, audio_file):
         """음성 파일에서 임베딩 추출"""
-        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
-            print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
+        if not self.ensure_model_loaded():
+            print(f"ℹ️  모델을 로드할 수 없습니다: {self.get_error_message()}")
             return None
         
         try:
-            signal, sr = torchaudio.load(audio_file)
-            
+            # soundfile로 로드 (torchcodec 의존 제거)
+            import soundfile as sf
+            from scipy.signal import resample
+
+            audio, sr = sf.read(audio_file, dtype='float32')
+            # 스테레오 -> 모노
+            if audio.ndim > 1:
+                audio = audio[:, 0]
+
             # 샘플레이트 변환 (16kHz)
             if sr != 16000:
-                resample = torchaudio.transforms.Resample(sr, 16000)
-                signal = resample(signal)
-            
+                num_samples = int(len(audio) * 16000 / sr)
+                audio = resample(audio, num_samples)
+
+            # (1, T) 형태로 변환
+            signal = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+
             # 임베딩 추출
             emb = self.voice_encoder.encode_batch(signal)
             embedding = emb.detach().cpu().numpy().flatten()

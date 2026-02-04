@@ -550,6 +550,23 @@ class AdminUI(QMainWindow):
     
     def voice_register_mode(self):
         """음성 등록 모드 (음성 녹음)"""
+        # 모델이 로드되지 않았다면 먼저 로드
+        if not self.voice_service.is_ready():
+            self.update_status("🔄 음성 인식 모델 로딩 중... (처음 실행 시 시간이 걸릴 수 있습니다)")
+            QApplication.processEvents()  # UI 업데이트
+            
+            if not self.voice_service.ensure_model_loaded():
+                error_msg = self.voice_service.get_error_message()
+                self.update_status(f"❌ 모델 로드 실패: {error_msg}")
+                QMessageBox.critical(
+                    self,
+                    "모델 로드 실패",
+                    f"음성 인식 모델을 로드할 수 없습니다.\n\n{error_msg}\n\n설치 방법:\npip install speechbrain"
+                )
+                return
+            
+            self.update_status("✅ 음성 인식 모델 로드 완료")
+        
         # 사용자 이름 입력
         name, ok = QInputDialog.getText(
             self,
@@ -612,8 +629,8 @@ class AdminUI(QMainWindow):
                     raise Exception("마이크 입력 장치를 찾을 수 없습니다.")
                 
                 print(f"발견된 입력 장치: {len(input_devices)}개")
-                for idx, name in input_devices:
-                    print(f"  [{idx}] {name}")
+                for idx, device_label in input_devices:
+                    print(f"  [{idx}] {device_label}")
                 
                 # 첫 번째 입력 장치를 기본으로 사용
                 device_id = input_devices[0][0]

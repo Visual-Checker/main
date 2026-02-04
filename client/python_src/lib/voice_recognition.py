@@ -5,6 +5,7 @@
 import os
 import pickle
 import numpy as np
+import torch
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,6 +13,21 @@ load_dotenv()
 SPEECHBRAIN_AVAILABLE = False
 try:
     import torchaudio
+
+    # torchaudio backend 체크 무력화 (Windows/환경 이슈 대응)
+    def _noop(*args, **kwargs):
+        return None
+
+    if not hasattr(torchaudio, "list_audio_backends"):
+        torchaudio.list_audio_backends = lambda: []
+    if hasattr(torchaudio, "set_audio_backend"):
+        torchaudio.set_audio_backend = _noop
+    if hasattr(torchaudio, "backend") and hasattr(torchaudio.backend, "utils"):
+        if hasattr(torchaudio.backend.utils, "set_audio_backend"):
+            torchaudio.backend.utils.set_audio_backend = _noop
+    if hasattr(torchaudio, "utils") and hasattr(torchaudio.utils, "check_torchaudio_backend"):
+        torchaudio.utils.check_torchaudio_backend = _noop
+
     from speechbrain.inference.speaker import EncoderClassifier
     SPEECHBRAIN_AVAILABLE = True
 except Exception:
@@ -34,10 +50,30 @@ class VoiceRecognizer:
         
         if SPEECHBRAIN_AVAILABLE:
             try:
-                self.voice_encoder = EncoderClassifier.from_hparams(
-                    source="speechbrain/spkrec-ecapa-voxceleb",
-                    savedir=model_path
-                )
+                # Windows symlink 권한 문제 회피 (symlink 대신 복사)
+                from pathlib import Path
+                original_symlink_to = Path.symlink_to
+
+                def _patched_symlink_to(self, target, target_is_directory=False):
+                    import shutil
+                    target = Path(target)
+                    self.parent.mkdir(parents=True, exist_ok=True)
+                    if target.is_file():
+                        shutil.copy2(target, self)
+                    elif target.is_dir():
+                        if self.exists():
+                            shutil.rmtree(self)
+                        shutil.copytree(target, self)
+
+                Path.symlink_to = _patched_symlink_to
+
+                try:
+                    self.voice_encoder = EncoderClassifier.from_hparams(
+                        source="speechbrain/spkrec-ecapa-voxceleb",
+                        savedir=model_path
+                    )
+                finally:
+                    Path.symlink_to = original_symlink_to
                 print("✓ 음성 인식 모델 초기화 성공")
             except Exception as e:
                 print(f"⚠️  음성 인식 모델 초기화 실패: {e}")
@@ -80,13 +116,20 @@ class VoiceRecognizer:
             return None
         
         try:
-            signal, sr = torchaudio.load(audio_file)
-            
-            # 샘플레이트 변환 (16kHz)
+            # soundfile로 로드 (torchcodec 의존 제거)
+            import soundfile as sf
+            from scipy.signal import resample
+
+            audio, sr = sf.read(audio_file, dtype='float32')
+            if audio.ndim > 1:
+                audio = audio[:, 0]
+
             if sr != 16000:
-                resample = torchaudio.transforms.Resample(sr, 16000)
-                signal = resample(signal)
-            
+                num_samples = int(len(audio) * 16000 / sr)
+                audio = resample(audio, num_samples)
+
+            signal = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+
             # 임베딩 추출
             emb = self.voice_encoder.encode_batch(signal)
             embedding = emb.detach().cpu().numpy().flatten()

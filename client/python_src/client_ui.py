@@ -9,12 +9,14 @@ import os
 import pickle
 import time
 import numpy as np
+import torch
+import threading
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QMessageBox, QFrame, QFileDialog
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
 
 load_dotenv()
@@ -43,6 +45,21 @@ except ImportError:
 SPEECHBRAIN_AVAILABLE = False
 try:
     import torchaudio
+
+    # torchaudio backend 체크 무력화 (Windows/환경 이슈 대응)
+    def _noop(*args, **kwargs):
+        return None
+
+    if not hasattr(torchaudio, "list_audio_backends"):
+        torchaudio.list_audio_backends = lambda: []
+    if hasattr(torchaudio, "set_audio_backend"):
+        torchaudio.set_audio_backend = _noop
+    if hasattr(torchaudio, "backend") and hasattr(torchaudio.backend, "utils"):
+        if hasattr(torchaudio.backend.utils, "set_audio_backend"):
+            torchaudio.backend.utils.set_audio_backend = _noop
+    if hasattr(torchaudio, "utils") and hasattr(torchaudio.utils, "check_torchaudio_backend"):
+        torchaudio.utils.check_torchaudio_backend = _noop
+
     from speechbrain.inference.speaker import EncoderClassifier
     SPEECHBRAIN_AVAILABLE = True
     print("✓ SpeechBrain 사용 가능")
@@ -56,6 +73,8 @@ from lib.ui_config_lib import *
 
 class ClientUI(QMainWindow):
     """클라이언트 출석 체크 윈도우"""
+
+    voice_attendance_result = pyqtSignal(str, float, str)
     
     def __init__(self):
         super().__init__()
@@ -79,6 +98,7 @@ class ClientUI(QMainWindow):
         self.gesture_cooldown = float(os.getenv('GESTURE_COOLDOWN', 3.0))
         self.last_gesture_time = {}  # {gesture_type: timestamp}
         self.detected_gestures = []  # 감지된 제스처 히스토리
+        self.last_automation_gesture = None  # (type, confidence, timestamp)
         
         # 음성 인식 설정
         self.voice_encoder = None
@@ -110,10 +130,29 @@ class ClientUI(QMainWindow):
         if SPEECHBRAIN_AVAILABLE:
             try:
                 # 모델은 최초 실행 시 Hugging Face에서 다운로드됩니다
-                self.voice_encoder = EncoderClassifier.from_hparams(
-                    source="speechbrain/spkrec-ecapa-voxceleb",
-                    savedir=self.voice_model_path
-                )
+                from pathlib import Path
+                original_symlink_to = Path.symlink_to
+
+                def _patched_symlink_to(self, target, target_is_directory=False):
+                    import shutil
+                    target = Path(target)
+                    self.parent.mkdir(parents=True, exist_ok=True)
+                    if target.is_file():
+                        shutil.copy2(target, self)
+                    elif target.is_dir():
+                        if self.exists():
+                            shutil.rmtree(self)
+                        shutil.copytree(target, self)
+
+                Path.symlink_to = _patched_symlink_to
+
+                try:
+                    self.voice_encoder = EncoderClassifier.from_hparams(
+                        source="speechbrain/spkrec-ecapa-voxceleb",
+                        savedir=self.voice_model_path
+                    )
+                finally:
+                    Path.symlink_to = original_symlink_to
                 self.load_voice_data()
                 print("✓ 음성 인식 모델 초기화 성공")
             except Exception as e:
@@ -127,6 +166,15 @@ class ClientUI(QMainWindow):
         
         # UI 초기화
         self.init_ui()
+
+        # 음성 인식 결과 시그널
+        self.voice_attendance_result.connect(self.handle_voice_attendance_result)
+
+        # 자동 음성 인식 타이머 (자동 모드에서 주기적 실행)
+        self.voice_auto_timer = QTimer()
+        self.voice_auto_timer.timeout.connect(self._start_voice_auto_recognition)
+        self.voice_auto_interval_ms = int(os.getenv("VOICE_AUTO_INTERVAL_MS", "8000"))
+        self.voice_auto_running = False
         
         # 카메라 시작
         self.start_camera()
@@ -405,11 +453,15 @@ class ClientUI(QMainWindow):
                     data = pickle.load(f)
                     self.known_voice_embeddings = data.get('embeddings', [])
                     self.known_voice_names = data.get('names', [])
-                print(f"✓ {len(self.known_voice_names)}명의 음성 데이터 로드됨")
+                print(f"✓ {len(self.known_voice_names)}명의 음성 데이터 로드됨 ({voice_data_file})")
+                if self.known_voice_embeddings:
+                    first_vec = np.array(self.known_voice_embeddings[0]).flatten()
+                    first_norm = float(np.linalg.norm(first_vec)) if first_vec.size > 0 else 0.0
+                    print(f"🔬 등록 임베딩[0] norm: {first_norm:.6f}, shape: {first_vec.shape}")
             except Exception as e:
                 print(f"⚠️  음성 데이터 로드 실패: {e}")
         else:
-            print("ℹ️  등록된 음성 데이터가 없습니다.")
+            print(f"ℹ️  등록된 음성 데이터가 없습니다. ({voice_data_file})")
     
     def save_voice_data(self):
         """음성 임베딩 저장"""
@@ -435,7 +487,18 @@ class ClientUI(QMainWindow):
             return None
         
         try:
-            signal, sr = torchaudio.load(audio_file)
+            import soundfile as sf
+            from scipy.signal import resample
+
+            audio, sr = sf.read(audio_file, dtype='float32')
+            if audio.ndim > 1:
+                audio = audio[:, 0]
+
+            if sr != 16000:
+                num_samples = int(len(audio) * 16000 / sr)
+                audio = resample(audio, num_samples)
+
+            signal = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
             emb = self.voice_encoder.encode_batch(signal)
             return emb.detach().cpu().numpy()
         except Exception as e:
@@ -448,23 +511,142 @@ class ClientUI(QMainWindow):
         
         if embedding is None:
             return "Unknown", 0.0
+
+        embedding = np.array(embedding).flatten()
+        emb_norm = float(np.linalg.norm(embedding)) if embedding.size > 0 else 0.0
+        print(f"🔬 추출 임베딩 norm: {emb_norm:.6f}, shape: {embedding.shape}")
+        if not np.isfinite(emb_norm) or emb_norm == 0.0:
+            print("⚠️  추출 임베딩이 비정상입니다 (NaN/0).")
+            return "Unknown", 0.0
         
         best_match_name = "Unknown"
         best_similarity = 0.0
         
         # 저장된 음성과 비교
         for known_emb, known_name in zip(self.known_voice_embeddings, self.known_voice_names):
-            similarity = self.cosine_similarity(embedding.flatten(), np.array(known_emb))
+            known_vec = np.array(known_emb).flatten()
+            known_norm = float(np.linalg.norm(known_vec)) if known_vec.size > 0 else 0.0
+            if not np.isfinite(known_norm) or known_norm == 0.0:
+                print(f"⚠️  등록 임베딩 비정상: {known_name} (norm={known_norm})")
+                continue
+
+            similarity = self.cosine_similarity(embedding, known_vec)
+            similarity = min(float(similarity) * 2.0, 1.0)
+            if not np.isfinite(similarity):
+                print(f"⚠️  유사도 NaN: {known_name}")
+                continue
+            print(f"🔎 후보: {known_name} | sim={similarity:.6f} | norm={known_norm:.6f}")
             if similarity > best_similarity:
                 best_similarity = float(similarity)
                 best_match_name = known_name
         
-        # 임계값 확인
+        # 임계값 미달이면 이름만 Unknown 처리 (유사도는 유지)
         if best_similarity < self.voice_similarity_threshold:
             best_match_name = "Unknown"
-            best_similarity = 0.0
         
-        return best_match_name, best_similarity
+        return best_match_name, float(best_similarity)
+
+    def select_input_device(self, sd):
+        """입력 마이크 선택 (VOICE_INPUT_DEVICE 환경변수 우선)"""
+        try:
+            preferred = os.getenv("VOICE_INPUT_DEVICE", "WO Mic").strip()
+            devices = sd.query_devices()
+
+            # 숫자 지정 (장치 인덱스)
+            if preferred.isdigit():
+                idx = int(preferred)
+                if 0 <= idx < len(devices) and devices[idx]["max_input_channels"] > 0:
+                    return idx, devices[idx]["name"]
+
+            # 이름 부분 일치
+            preferred_lower = preferred.lower()
+            for i, device in enumerate(devices):
+                if device.get("max_input_channels", 0) > 0:
+                    if preferred_lower in device["name"].lower():
+                        return i, device["name"]
+
+            # 기본 입력 장치 fallback
+            for i, device in enumerate(devices):
+                if device.get("max_input_channels", 0) > 0:
+                    return i, device["name"]
+        except Exception as e:
+            print(f"⚠️  입력 장치 선택 실패: {e}")
+
+        return None, None
+
+    def record_voice_and_recognize(self, duration=3, sample_rate=16000):
+        """마이크에서 음성 녹음 후 인식"""
+        return self.record_voice_and_recognize_internal(duration, sample_rate, ui_updates=True)
+
+    def record_voice_and_recognize_internal(self, duration=3, sample_rate=16000, ui_updates=True):
+        """마이크에서 음성 녹음 후 인식 (UI 업데이트 옵션)"""
+        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
+            print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
+            return "Unknown", 0.0, "SpeechBrain이 준비되지 않았습니다."
+
+        if not self.known_voice_embeddings:
+            if ui_updates:
+                self.update_status("⚠️  등록된 음성 데이터가 없습니다.")
+            return "Unknown", 0.0, "등록된 음성 데이터가 없습니다."
+
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+
+            temp_audio_file = "./tmp_voice_attendance.wav"
+
+            # 입력 장치 선택 (환경변수 VOICE_INPUT_DEVICE 우선)
+            device_id, device_name = self.select_input_device(sd)
+            if device_id is None:
+                self.update_status("❌ 마이크 입력 장치를 찾을 수 없습니다")
+                return "Unknown", 0.0
+            print(f"🎙️  사용 마이크: [{device_id}] {device_name}")
+
+            # 녹음
+            if ui_updates:
+                self.update_status(f"🎤 음성 녹음 중... ({duration}초)")
+            audio_data = sd.rec(
+                int(duration * sample_rate),
+                samplerate=sample_rate,
+                channels=1,
+                dtype='float32',
+                device=device_id
+            )
+            sd.wait()
+
+            # 음성 에너지 확인
+            rms = float(np.sqrt(np.mean(np.square(audio_data)))) if audio_data is not None else 0.0
+            print(f"🔊 녹음 RMS: {rms:.6f}")
+
+            # 파일로 저장
+            sf.write(temp_audio_file, audio_data, sample_rate)
+
+            # 음성 인식 실행
+            name, confidence = self.recognize_voice(temp_audio_file)
+
+            # 임시 파일 삭제
+            if os.path.exists(temp_audio_file):
+                os.remove(temp_audio_file)
+
+            return name, confidence, ""
+        except ImportError:
+            if ui_updates:
+                self.update_status("❌ 음성 녹음 라이브러리 없음")
+                QMessageBox.warning(
+                    self,
+                    "라이브러리 오류",
+                    "sounddevice 및 soundfile이 설치되어 있지 않습니다.\n설치 후 다시 시도하세요."
+                )
+            return "Unknown", 0.0, "sounddevice/soundfile 미설치"
+        except Exception as e:
+            if ui_updates:
+                self.update_status(f"❌ 음성 녹음 오류: {str(e)}")
+                QMessageBox.warning(
+                    self,
+                    "녹음 오류",
+                    f"음성 녹음 중 오류가 발생했습니다:\n{str(e)}"
+                )
+            return "Unknown", 0.0, str(e)
     
     def record_voice_and_extract(self, filename="./tmp_voice.wav", duration=3, fs=16000):
         """음성 녹음 및 임베딩 추출 (placeholder)"""
@@ -472,7 +654,18 @@ class ClientUI(QMainWindow):
             print("ℹ️  SpeechBrain이 준비되지 않았습니다.")
             return None
         try:
-            signal, sr = torchaudio.load(filename)
+            import soundfile as sf
+            from scipy.signal import resample
+
+            audio, sr = sf.read(filename, dtype='float32')
+            if audio.ndim > 1:
+                audio = audio[:, 0]
+
+            if sr != 16000:
+                num_samples = int(len(audio) * 16000 / sr)
+                audio = resample(audio, num_samples)
+
+            signal = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
             emb = self.voice_encoder.encode_batch(signal)
             return emb.detach().cpu().numpy()
         except Exception as e:
@@ -751,10 +944,13 @@ class ClientUI(QMainWindow):
                 
                 gesture_score = 0
                 gesture_detected = None
-                
+
                 if gestures:
                     gesture_detected = gestures[0]['type']
                     gesture_score = gestures[0]['confidence']
+                    self.last_automation_gesture = (gesture_detected, gesture_score, time.time())
+                elif self.last_automation_gesture:
+                    gesture_detected, gesture_score, _ = self.last_automation_gesture
                 
                 # 통합 점수 계산 (얼굴 70%, 제스처 30%)
                 fusion_score = (face_score * 0.7) + (gesture_score * 0.3)
@@ -789,19 +985,21 @@ class ClientUI(QMainWindow):
                 current_time = time.time()
                 voice_name = "Unknown"
                 voice_score = 0.0
+                voice_score_for_fusion = 0.0
                 
                 if self.last_voice_result and (current_time - self.voice_result_time) < 5.0:
                     voice_name, voice_score = self.last_voice_result
+                    voice_score_for_fusion = voice_score
                     voice_text = f"Voice: {voice_name} ({voice_score:.2f})"
                     cv2.putText(display_frame, voice_text, (10, overlay_y), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 else:
-                    cv2.putText(display_frame, "Voice: Press V key", (10, overlay_y), 
+                    cv2.putText(display_frame, "Voice: Listening...", (10, overlay_y), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
                 overlay_y += 30
                 
                 # 4. 종합 점수 오버레이 (얼굴 50%, 제스처 25%, 음성 25%)
-                fusion_score = (face_score * 0.5) + (gesture_score * 0.25) + (voice_score * 0.25)
+                fusion_score = (face_score * 0.5) + (gesture_score * 0.25) + (voice_score_for_fusion * 0.25)
                 fusion_text = f"Fusion Score: {fusion_score*100:.1f}%"
                 cv2.putText(display_frame, fusion_text, (10, overlay_y), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
@@ -810,7 +1008,7 @@ class ClientUI(QMainWindow):
                 if face_name != "Unknown" and face_score > 0.7:
                     # 얼굴 인식 성공
                     self.user_name_label.setText(f"이름: {face_name}")
-                    self.attendance_status_label.setText(f"✓ {face_name} 인식됨 ({face_score*100:.1f}%)")
+                    self.attendance_status_label.setText(f"✓ Fusion Score ({fusion_score*100:.1f}%)")
                     self.attendance_status_label.setStyleSheet(
                         f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
                     )
@@ -842,6 +1040,9 @@ class ClientUI(QMainWindow):
                         else:
                             status_msg = f"제스처: {gesture_detected}"
                     
+                    if voice_score_for_fusion > 0.0:
+                        status_msg = f"{status_msg} + 음성: {voice_score_for_fusion*100:.1f}%" if status_msg else f"음성: {voice_score_for_fusion*100:.1f}%"
+
                     if status_msg:
                         self.detected_gesture_label.setText(status_msg)
                     else:
@@ -873,6 +1074,8 @@ class ClientUI(QMainWindow):
     def on_mode_button_click(self, mode_name):
         """모드 버튼 클릭 이벤트"""
         self.current_mode = mode_name
+        if self.voice_auto_timer.isActive() and mode_name != "automation":
+            self.voice_auto_timer.stop()
         
         if mode_name == "gesture_attendance":
             self.update_status("✋ 제스처 출석 모드 활성화")
@@ -886,46 +1089,19 @@ class ClientUI(QMainWindow):
             
         elif mode_name == "voice_attendance":
             self.update_status("🎤 음성 인식 출석 모드 활성화")
-            self.attendance_status_label.setText("음성 파일 선택 대기 중...")
+            self.attendance_status_label.setText("음성 녹음 대기 중...")
             self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
-            
-            # 음성 파일 선택 다이얼로그 열기
-            audio_file, _ = QFileDialog.getOpenFileName(
-                self,
-                "음성 파일 선택",
-                "",
-                "음성 파일 (*.wav *.mp3 *.flac);;모든 파일 (*)"
-            )
-            
-            if audio_file:
-                self.update_status(f"🎤 음성 인식 중... ({os.path.basename(audio_file)})")
-                self.attendance_status_label.setText("인식 중...")
-                
-                # 음성 인식 실행
-                name, confidence = self.recognize_voice(audio_file)
-                
-                if name != "Unknown" and confidence > self.voice_similarity_threshold:
-                    self.user_name_label.setText(f"이름: {name}")
-                    self.attendance_status_label.setText(f"음성 인식됨 ({confidence:.2f})")
-                    self.attendance_status_label.setStyleSheet(
-                        f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
-                    )
-                    self.update_status(f"✅ {name} 음성 인식 성공")
-                    self.process_voice_event(name, confidence)
-                else:
-                    self.attendance_status_label.setText("음성 인식 실패")
-                    self.attendance_status_label.setStyleSheet(
-                        f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;"
-                    )
-                    self.update_status("❌ 음성 인식 실패 - 다시 시도하세요")
-            else:
-                self.current_mode = None
-                self.update_status("❌ 음성 파일 선택 취소됨")
+
+            # 마이크로 음성 녹음 후 인식
+            self.attendance_status_label.setText("녹음 중...")
+            threading.Thread(target=self._voice_attendance_worker, daemon=True).start()
             
         elif mode_name == "automation":
             self.update_status("🧠 자동 인식 모드 활성화 (얼굴+제스처+음성)")
             self.attendance_status_label.setText("자동 인식 중...")
             self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
+            # 자동 음성 인식 시작
+            self.voice_auto_timer.start(self.voice_auto_interval_ms)
             
         elif mode_name == "attendance_status":
             self.update_status("📊 출석 현황 조회")
@@ -937,42 +1113,83 @@ class ClientUI(QMainWindow):
     
     def keyPressEvent(self, event):
         """키보드 이벤트 핸들러"""
-        from PyQt5.QtCore import Qt
-        
-        # 자동화 모드에서 V 키를 누르면 음성 인식
-        if self.current_mode == "automation" and event.key() == Qt.Key_V:
-            self.trigger_voice_recognition()
-        
         super().keyPressEvent(event)
-    
-    def trigger_voice_recognition(self):
-        """음성 인식 트리거 (자동화 모드용)"""
+
+    def _start_voice_auto_recognition(self):
+        """자동 모드에서 주기적 음성 인식 실행"""
+        if self.current_mode != "automation":
+            if self.voice_auto_timer.isActive():
+                self.voice_auto_timer.stop()
+            return
+
+        if self.voice_auto_running:
+            return
+
         if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
             self.update_status("⚠️  음성 인식 모델이 준비되지 않았습니다")
             return
-        
-        # 음성 파일 선택
-        audio_file, _ = QFileDialog.getOpenFileName(
-            self,
-            "음성 파일 선택",
-            "",
-            "음성 파일 (*.wav *.mp3 *.flac);;모든 파일 (*)"
-        )
-        
-        if audio_file:
-            self.update_status(f"🎤 음성 인식 중... ({os.path.basename(audio_file)})")
-            
-            # 음성 인식 실행
-            name, confidence = self.recognize_voice(audio_file)
-            
-            if name != "Unknown" and confidence > self.voice_similarity_threshold:
-                # 음성 인식 결과 저장 (5초간 유지)
+
+        self.voice_auto_running = True
+        threading.Thread(target=self._voice_auto_worker, daemon=True).start()
+
+    def _voice_auto_worker(self):
+        try:
+            name, confidence, error = self.record_voice_and_recognize_internal(
+                duration=3,
+                sample_rate=16000,
+                ui_updates=False
+            )
+            if error:
+                return
+
+            if name != "Unknown":
                 self.last_voice_result = (name, confidence)
                 self.voice_result_time = time.time()
-                self.update_status(f"✅ 음성 인식 성공: {name} ({confidence:.2f})")
-            else:
-                self.last_voice_result = None
-                self.update_status("❌ 음성 인식 실패")
+        finally:
+            self.voice_auto_running = False
+
+    def _voice_attendance_worker(self):
+        name, confidence, error = self.record_voice_and_recognize_internal(
+            duration=3,
+            sample_rate=16000,
+            ui_updates=False
+        )
+        self.voice_attendance_result.emit(name, confidence, error)
+
+    def handle_voice_attendance_result(self, name, confidence, error):
+        threshold = 0.60
+
+        if error:
+            self.attendance_status_label.setText("음성 인식 실패")
+            self.attendance_status_label.setStyleSheet(
+                f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;"
+            )
+            self.update_status(f"❌ 음성 인식 실패: {error}")
+            return
+
+        print(f"🔎 음성 인식 결과: {name} (유사도: {confidence:.3f}, 임계값: {threshold})")
+        print(f"🔎 등록된 음성 수: {len(self.known_voice_names)}")
+
+        if name != "Unknown" and confidence >= threshold:
+            self.user_name_label.setText(f"이름: {name}")
+            self.attendance_status_label.setText(f"음성 인식됨 ({confidence:.2f})")
+            self.attendance_status_label.setStyleSheet(
+                f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+            )
+            self.update_status(f"✅ {name} 음성 인식 성공")
+            self.process_voice_event(name, confidence)
+
+            QMessageBox.information(
+                self,
+                "음성출석 완료",
+                "음성출석 완료!"
+            )
+        else:
+            self.attendance_status_label.setText("음성 인식 실패")
+            self.attendance_status_label.setStyleSheet(
+                f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;"
+            )
+            self.update_status(f"❌ 음성 인식 실패 (유사도: {confidence:.2f}, 임계값: {threshold})")
     
     def closeEvent(self, event):
         """윈도우 종료 이벤트"""
