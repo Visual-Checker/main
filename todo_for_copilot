@@ -1,0 +1,139 @@
+# information about the system that copilot need to know
+---
+
+1. 시스템 목적
+본 시스템은 얼굴·제스처·음성 기반 멀티모달 인식을 통해 사용자를 식별하고, 출입(Check-in / Check-out) 및 권한 승인을 수행하는 것을 목표로 한다.
+Server/Admin: 데이터 등록(Enrollment) 및 관리
+Client: 실시간 추론(Inference) 및 사용자 상호작용
+---
+2. 전체 아키텍처 개요
+2.1 구성 요소
+Server/Admin
+Face Recognition (DeepInsight / InsightFace)
+Gesture Recognition (MediaPipe Hands)
+Voice Recognition (SpeechBrain ECAPA-TDNN)
+Decision / Log Service
+Client
+User Recognition (실시간 추론)
+Check-in / Check-out Checker (vector 기반)
+Logger
+DB 계층
+PostgreSQL (메타데이터, 권한, 로그)
+Vector Store (얼굴/제스처/음성 임베딩)
+---
+3. 인식 모듈별 역할
+3.1 Face Recognition
+모델: DeepInsight (ArcFace 계열)
+역할:
+얼굴 이미지 → 512D embedding 생성
+기준 이미지와 실시간 캠 인물 간 동일 인물 판별
+사용 위치:
+Enrollment: Server
+Inference: Client (또는 Server API)
+---
+3.2 Gesture Recognition
+모델: MediaPipe Hands (21 landmarks)
+역할:
+손 관절 좌표 추출
+정적/동적 제스처 인식
+특징:
+CPU 기반 실시간 처리
+제스처는 보조 인증 수단으로 사용
+---
+3.3 Voice Recognition
+모델: SpeechBrain ECAPA-TDNN
+역할:
+음성 → speaker embedding 생성
+사용자 음성 식별 및 보조 인증
+---
+4. Enrollment / Inference 분리
+4.1 Enrollment (Server/Admin 전용)
+Face / Gesture / Voice 데이터 등록
+입력 품질 검증(Quality Gate) 후 embedding 생성
+Vector Store에 embedding 저장
+PostgreSQL에 user_id 및 메타데이터 저장
+Client에서는 등록 불가 (보안 및 무결성 목적)
+---
+4.2 Inference (Client)
+실시간 CAM 입력
+MediaPipe 기반 얼굴/손 검출
+embedding 생성 후 Vector Store와 비교
+similarity score 산출
+---
+5. Quality Gate (입력 품질 필터)
+5.1 목적
+저품질 데이터 유입 차단
+인식률 저하 및 DB 오염 방지
+5.2 예시 기준
+Face: blur score, yaw/pitch, face size
+Gesture: landmark confidence
+Voice: SNR, silence ratio
+---
+6. Decision Fusion Layer
+6.1 역할
+Face / Gesture / Voice 인식 결과를 종합하여 최종 승인/거부 판단
+6.2 예시 로직
+Face ≥ 0.65 → PASS
+Face ≥ 0.5 + Voice ≥ 0.6 → PASS
+Gesture는 상황별 보조 인증
+확장 시 다중 인증(MFA) 구조로 자연스럽게 확장 가능
+---
+7. 데이터 저장 구조
+7.1 PostgreSQL
+user_id
+permission / role
+enrollment metadata
+check-in / check-out log
+7.2 Vector Store
+Face embedding
+Gesture embedding
+Voice embedding
+cosine similarity / L2 distance 기반 검색
+구현 선택지: pgvector / FAISS / Milvus / Qdrant
+---
+8. Log & Monitoring
+Log Service: Pydantic / LogFire
+인식 결과, 점수, model_version 기록
+필요 시 비동기 Queue(Kafka / Redis Stream) 연동
+---
+9. Model Versioning
+model_name
+model_version
+threshold
+deployed_at
+인식률 이슈 발생 시 롤백 및 원인 추적 가능
+---
+10. 확장 고려 사항 (선택)
+Liveness / Anti-Spoofing (blink, head movement, voice challenge)
+Client-side embedding cache (N초 재비교 방지)
+GPU 서버 확장 및 scale-out
+---
+11. 설계 요약
+Server: 등록 + 관리 중심
+Client: 실시간 추론 중심
+MediaPipe: 실시간 제스처/검출
+DeepInsight: 신원 식별 핵심
+멀티모달 Decision Fusion으로 신뢰도 확보
+실서비스(출입 인증, 사용자 식별)로 바로 확장 가능한 구조
+
+이긴 한데 일단은 하나하나 내가 확인하고 진행할거임.
+
+
+#참고자료
+check_this_file_for_voice/*
+mini project-2/*
+
+# TODO List for Copilot
+
+# client/admin 동시 개선
+
+
+
+# client
+1. 음성 인식: 음성 인식 과정에서 화면 프리징 문제 해결 필요
+2. 음성 인식: 실시간 음성 녹음 및 처리 기능
+3. 음성인식: 음성 인식이 안되고 있음. 마이크를 WoMic으로 설정하도록 해야함
+
+# admin
+
+
