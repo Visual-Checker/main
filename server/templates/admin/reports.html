@@ -4,12 +4,75 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>보고서</title>
-    <style>body{font-family:Segoe UI,Arial;background:#f5f5f5;padding:30px;} .card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08)}</style>
+    <style>body{font-family:Segoe UI,Arial;background:#f5f5f5;padding:30px;} .card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.08)} table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #eee}</style>
 </head>
 <body>
     <h1>보고서</h1>
     <div class="card">
-        <p>출석/통계 보고서 생성 페이지 (구현 예정)</p>
+        <p>출석 조회</p>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+            <label>
+                날짜
+                <input type="date" id="filter-date" />
+            </label>
+            <label>
+                사번
+                <input type="text" id="filter-emp" placeholder="E001" />
+            </label>
+            <button id="filter-btn">조회</button>
+            <button id="reset-btn">초기화</button>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>사번</th>
+                    <th>이름</th>
+                    <th>이메일</th>
+                    <th>출근</th>
+                    <th>퇴근</th>
+                </tr>
+            </thead>
+            <tbody id="attendance-body"></tbody>
+        </table>
     </div>
+    <script>
+        function buildQuery(){
+            const date = document.getElementById('filter-date').value;
+            const emp = document.getElementById('filter-emp').value.trim();
+            const params = new URLSearchParams();
+            params.set('limit', '200');
+            if (date) params.set('date', date);
+            if (emp) params.set('employee_no', emp);
+            return params.toString();
+        }
+
+        async function loadAttendance(){
+            const query = buildQuery();
+            const res = await fetch(`/admin/api/attendance-records?${query}`);
+            const data = await res.json();
+            const tbody = document.getElementById('attendance-body');
+            tbody.innerHTML = '';
+            data.forEach(r => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${r.id ?? '-'}</td>
+                    <td>${r.employee_no ?? '-'}</td>
+                    <td>${r.name ?? '-'}</td>
+                    <td>${r.email ?? '-'}</td>
+                    <td>${r.check_in_time ?? '-'}</td>
+                    <td>${r.check_out_time ?? '-'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+        document.getElementById('filter-btn').addEventListener('click', loadAttendance);
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            document.getElementById('filter-date').value = '';
+            document.getElementById('filter-emp').value = '';
+            loadAttendance();
+        });
+        loadAttendance();
+    </script>
 </body>
 </html>

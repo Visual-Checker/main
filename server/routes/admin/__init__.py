@@ -2,9 +2,9 @@ from flask import Blueprint, render_template, request, jsonify, session, redirec
 import redis
 import json
 import os
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 import logfire
 import psycopg2
 
@@ -40,6 +40,22 @@ class PostgresLogEntry(BaseModel):
     detail: str | None = None
 
 
+class AttendanceQuery(BaseModel):
+    limit: int = Field(default=200, ge=1, le=1000)
+    date: date | None = None
+    employee_no: str | None = None
+
+
+class AttendanceRecordEntry(BaseModel):
+    id: int
+    employee_no: str
+    name: str
+    email: str
+    created_at: datetime
+    check_in_time: datetime | None = None
+    check_out_time: datetime | None = None
+
+
 def _get_db_config():
     return {
         'host': os.getenv('DB_HOST'),
@@ -61,6 +77,56 @@ def _add_postgres_log(entry: PostgresLogEntry):
         logfire.warning(entry.message, **payload)
     else:
         logfire.info(entry.message, **payload)
+
+
+def _fetch_attendance_records(query: AttendanceQuery) -> list[AttendanceRecordEntry]:
+    cfg = _get_db_config()
+    sql = (
+        'SELECT id, employee_no, name, email, created_at, check_in_time, check_out_time '
+        'FROM "UserData"."userdata"'
+    )
+    conditions = []
+    params: list[object] = []
+
+    if query.date:
+        conditions.append('DATE(check_in_time) = %s')
+        params.append(query.date)
+    if query.employee_no:
+        conditions.append('employee_no = %s')
+        params.append(query.employee_no)
+
+    if conditions:
+        sql += ' WHERE ' + ' AND '.join(conditions)
+
+    sql += ' ORDER BY id DESC LIMIT %s'
+    params.append(query.limit)
+
+    records: list[AttendanceRecordEntry] = []
+    with psycopg2.connect(
+        host=cfg['host'],
+        port=cfg['port'],
+        dbname=cfg['dbname'],
+        user=cfg['user'],
+        password=cfg['password'],
+        connect_timeout=5
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            for row in rows:
+                records.append(
+                    AttendanceRecordEntry(
+                        id=row[0],
+                        employee_no=row[1],
+                        name=row[2],
+                        email=row[3],
+                        created_at=row[4],
+                        check_in_time=row[5],
+                        check_out_time=row[6]
+                    )
+                )
+
+    return records
 
 @admin_bp.route('/')
 def index():
@@ -136,6 +202,46 @@ def get_attendance_events():
 def get_postgres_logs():
     """최근 PostgreSQL 로그를 반환"""
     return jsonify(POSTGRES_LOGS[-100:])
+
+
+@admin_bp.route('/api/attendance-records')
+def get_attendance_records():
+    try:
+        query = AttendanceQuery(
+            limit=request.args.get('limit', 200),
+            date=request.args.get('date'),
+            employee_no=request.args.get('employee_no')
+        )
+    except ValidationError as e:
+        return jsonify({'status': 'error', 'message': 'Invalid query parameters', 'detail': e.errors()}), 400
+
+    try:
+        records = _fetch_attendance_records(query)
+        _add_postgres_log(
+            PostgresLogEntry(
+                level='INFO',
+                message='Attendance records fetched',
+                host=_get_db_config().get('host'),
+                port=_get_db_config().get('port'),
+                dbname=_get_db_config().get('dbname'),
+                user=_get_db_config().get('user'),
+                detail=f"count={len(records)}"
+            )
+        )
+        return jsonify([r.model_dump() for r in records])
+    except Exception as e:
+        _add_postgres_log(
+            PostgresLogEntry(
+                level='ERROR',
+                message='Attendance records fetch failed',
+                host=_get_db_config().get('host'),
+                port=_get_db_config().get('port'),
+                dbname=_get_db_config().get('dbname'),
+                user=_get_db_config().get('user'),
+                detail=str(e)
+            )
+        )
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @admin_bp.route('/api/postgres-ping')

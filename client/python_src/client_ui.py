@@ -11,6 +11,10 @@ import time
 import numpy as np
 import torch
 import threading
+from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+from matplotlib import font_manager, rcParams
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -1120,11 +1124,139 @@ class ClientUI(QMainWindow):
             
         elif mode_name == "attendance_status":
             self.update_status("📊 출석 현황 조회")
-            QMessageBox.information(self, "출석 현황", "출석 현황 조회 기능입니다.")
+            self.show_attendance_status_plot()
     
     def update_status(self, message):
         """상태바 업데이트"""
         self.status_bar.setText(message)
+
+    def _get_attendance_db_config(self):
+        return {
+            "host": os.getenv("DB_HOST", "192.168.0.41"),
+            "port": int(os.getenv("DB_PORT", "5432")),
+            "dbname": os.getenv("DB_NAME", "devserver"),
+            "user": os.getenv("DB_USER", "orugu"),
+            "password": os.getenv("DB_PASSWORD", "orugu#0916"),
+        }
+
+    def _fetch_attendance_records(self, limit=200):
+        cfg = self._get_attendance_db_config()
+        records = []
+        sql = (
+            'SELECT id, employee_no, name, email, created_at, check_in_time, check_out_time '
+            'FROM "UserData"."userdata" ORDER BY id DESC LIMIT %s'
+        )
+
+        encoding_primary = os.getenv("ATTENDANCE_DB_ENCODING", "UTF8")
+        encoding_fallback = os.getenv("ATTENDANCE_DB_ENCODING_FALLBACK", "EUC_KR")
+        encoding_last_resort = os.getenv("ATTENDANCE_DB_ENCODING_LAST", "LATIN1")
+
+        def _run_query(client_encoding: str):
+            os.environ["PGCLIENTENCODING"] = client_encoding
+            import psycopg2
+            with psycopg2.connect(
+                host=cfg["host"],
+                port=cfg["port"],
+                dbname=cfg["dbname"],
+                user=cfg["user"],
+                password=cfg["password"],
+                connect_timeout=5,
+                options=f"-c client_encoding={client_encoding} -c lc_messages=C"
+            ) as conn:
+                conn.set_client_encoding(client_encoding)
+                with conn.cursor() as cur:
+                    cur.execute(sql, (limit,))
+                    return cur.fetchall()
+
+        try:
+            rows = _run_query(encoding_primary)
+        except UnicodeDecodeError:
+            try:
+                rows = _run_query(encoding_fallback)
+            except UnicodeDecodeError:
+                rows = _run_query(encoding_last_resort)
+
+        for row in rows:
+            records.append({
+                "id": row[0],
+                "employee_no": row[1],
+                "name": row[2],
+                "email": row[3],
+                "created_at": row[4],
+                "check_in_time": row[5],
+                "check_out_time": row[6],
+            })
+        return records
+
+    def show_attendance_status_plot(self):
+        # Matplotlib 한글 폰트 설정 (Windows 기본: 맑은 고딕)
+        try:
+            malgun = "C:\\Windows\\Fonts\\malgun.ttf"
+            if os.path.exists(malgun):
+                font_manager.fontManager.addfont(malgun)
+                rcParams["font.family"] = "Malgun Gothic"
+            else:
+                for name in ["NanumGothic", "AppleGothic", "Malgun Gothic"]:
+                    if any(f.name == name for f in font_manager.fontManager.ttflist):
+                        rcParams["font.family"] = name
+                        break
+            rcParams["axes.unicode_minus"] = False
+        except Exception:
+            pass
+
+        try:
+            records = self._fetch_attendance_records(limit=200)
+        except UnicodeDecodeError:
+            cfg = self._get_attendance_db_config()
+            QMessageBox.warning(
+                self,
+                "출석 현황",
+                "DB 연결 중 인코딩 오류가 발생했습니다.\n"
+                "DB_USER/DB_PASSWORD 또는 DB_HOST/DB_NAME이 다른 서버와 맞지 않을 수 있습니다.\n\n"
+                f"현재 설정: {cfg['host']}:{cfg['port']} / {cfg['dbname']} / {cfg['user']}"
+            )
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "출석 현황", f"DB 조회 실패: {e}")
+            return
+
+        if not records:
+            QMessageBox.information(self, "출석 현황", "조회된 출석 데이터가 없습니다.")
+            return
+
+        records = list(reversed(records))
+        labels = [f"{r['employee_no']} {r['name']}" for r in records]
+
+        def dt_to_minutes(dt_value):
+            if not isinstance(dt_value, datetime):
+                return None
+            return dt_value.hour * 60 + dt_value.minute + dt_value.second / 60.0
+
+        check_in = [dt_to_minutes(r["check_in_time"]) for r in records]
+        check_out = [dt_to_minutes(r["check_out_time"]) for r in records]
+
+        x = list(range(len(labels)))
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(x, check_in, marker='o', label='Check-in')
+        plt.plot(x, check_out, marker='o', label='Check-out')
+        plt.title("출석 현황 (Check-in/Check-out)")
+        plt.xlabel("사용자")
+        plt.ylabel("시간")
+        plt.xticks(x, labels, rotation=45, ha='right')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+
+        def minutes_to_hhmm(value, _):
+            if value is None:
+                return ""
+            hours = int(value // 60)
+            minutes = int(value % 60)
+            return f"{hours:02d}:{minutes:02d}"
+
+        plt.gca().yaxis.set_major_formatter(ticker.FuncFormatter(minutes_to_hhmm))
+        plt.tight_layout()
+        plt.show()
     
     def keyPressEvent(self, event):
         """키보드 이벤트 핸들러"""
