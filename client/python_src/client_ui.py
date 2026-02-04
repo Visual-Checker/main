@@ -956,7 +956,7 @@ class ClientUI(QMainWindow):
                 fusion_score = (face_score * 0.7) + (gesture_score * 0.3)
                 
                 # 동시 오버레이: 카메라 프레임에 실시간 표시
-                h, w, _ = display_frame.shape
+                #h, w, _ = display_frame.shape
                 
                 # 1. 얼굴 정보 오버레이
                 overlay_y = 30
@@ -1005,7 +1005,22 @@ class ClientUI(QMainWindow):
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 
                 # 자동 인식 기준: 얼굴 인식률 > 70% 또는 (얼굴 > 50% AND 제스처 감지)
-                if face_name != "Unknown" and face_score > 0.7:
+                if fusion_score >= 0.90:
+                    display_name = face_name if face_name != "Unknown" else voice_name
+                    if display_name == "Unknown":
+                        display_name = "사용자"
+                    self.user_name_label.setText(f"이름: {display_name}")
+                    self.attendance_status_label.setText(f"✓ {display_name} 출석 완료")
+                    self.attendance_status_label.setStyleSheet(
+                        f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
+                    )
+                    status_msg = f"Fusion Score: {fusion_score*100:.1f}%"
+                    if gesture_detected:
+                        status_msg += f" + 제스처: {gesture_detected}"
+                    if voice_score_for_fusion > 0.0:
+                        status_msg += f" + 음성: {voice_score_for_fusion*100:.1f}%"
+                    self.detected_gesture_label.setText(status_msg)
+                elif face_name != "Unknown" and face_score > 0.7:
                     # 얼굴 인식 성공
                     self.user_name_label.setText(f"이름: {face_name}")
                     self.attendance_status_label.setText(f"✓ Fusion Score ({fusion_score*100:.1f}%)")
