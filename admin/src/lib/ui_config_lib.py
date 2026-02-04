@@ -35,6 +35,7 @@ LEFT_BUTTONS = [
     {"text": "📷 사진 등록", "name": "photo_register"},
     {"text": "🎤 목소리 등록", "name": "voice_register"},
     {"text": "👋 제스처 등록", "name": "gesture_register"},
+    {"text": "🗂️ 등록 데이터 관리", "name": "data_manage"},
 ]
 
 # ========== 중앙 카메라 영역 설정 ==========

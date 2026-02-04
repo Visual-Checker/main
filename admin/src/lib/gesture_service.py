@@ -32,7 +32,10 @@ class GestureService:
         self.gesture_confidence_threshold = float(os.getenv('GESTURE_CONFIDENCE_THRESHOLD', 0.7))
         self.gesture_cooldown = float(os.getenv('GESTURE_COOLDOWN', 3.0))
         self.model_path = model_path
-        self.gesture_data_file = os.getenv('GESTURE_DATA_FILE', './data/admin_gesture_data.pkl')
+        default_gesture_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'admin_gesture_data.pkl')
+        )
+        self.gesture_data_file = os.getenv('GESTURE_DATA_FILE', default_gesture_path)
         self.known_gestures = {}  # {gesture_type: [{landmarks: [...], name: ...}, ...]}
         
         if MEDIAPIPE_AVAILABLE:

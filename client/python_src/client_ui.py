@@ -12,13 +12,14 @@ import numpy as np
 import torch
 import threading
 from datetime import datetime
-import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from matplotlib import font_manager, rcParams
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QMessageBox, QFrame, QFileDialog
+    QVBoxLayout, QHBoxLayout, QMessageBox, QFrame, QFileDialog, QStackedLayout, QInputDialog
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
@@ -88,6 +89,7 @@ class ClientUI(QMainWindow):
         self.current_frame = None
         self.current_mode = None  # 'gesture', 'face', 'voice', None
         self.current_user = None
+        self.attendance_check_type = "in"  # 'in' or 'out'
         
         # 얼굴 감지기 초기화
         self.face_detector = None
@@ -109,9 +111,14 @@ class ClientUI(QMainWindow):
         self.known_voice_embeddings = []
         self.known_voice_names = []
         self.voice_similarity_threshold = float(os.getenv('VOICE_SIMILARITY_THRESHOLD', 0.7))
+        self.voice_sensitivity_multiplier = float(os.getenv('VOICE_SENSITIVITY_MULTIPLIER', 3.0))
+        self.voice_activity_threshold = float(os.getenv('VOICE_ACTIVITY_THRESHOLD', 0.01))
         self.voice_model_path = os.getenv('VOICE_MODEL_PATH', 'models/spkrec-ecapa-voxceleb')
         self.last_voice_result = None  # 마지막 음성 인식 결과 (name, confidence)
         self.voice_result_time = 0  # 마지막 음성 인식 시간
+        self.voice_live_running = False
+        self.voice_live_interval_ms = int(os.getenv("VOICE_LIVE_INTERVAL_MS", "1500"))
+        self.voice_live_duration = float(os.getenv("VOICE_LIVE_DURATION", "1.5"))
         
         if MEDIAPIPE_AVAILABLE and USE_TASK_API:
             try:
@@ -179,6 +186,10 @@ class ClientUI(QMainWindow):
         self.voice_auto_timer.timeout.connect(self._start_voice_auto_recognition)
         self.voice_auto_interval_ms = int(os.getenv("VOICE_AUTO_INTERVAL_MS", "8000"))
         self.voice_auto_running = False
+
+        # 실시간 음성 인식 타이머 (음성 모드에서 주기적 실행)
+        self.voice_live_timer = QTimer()
+        self.voice_live_timer.timeout.connect(self._start_voice_live_recognition)
         
         # 카메라 시작
         self.start_camera()
@@ -211,8 +222,8 @@ class ClientUI(QMainWindow):
         cam_info_layout = QHBoxLayout()
         
         # 카메라 영역
-        self.camera_label = self.create_camera_view()
-        cam_info_layout.addWidget(self.camera_label)
+        self.camera_widget = self.create_camera_view()
+        cam_info_layout.addWidget(self.camera_widget)
         
         # 우측 정보 패널
         right_panel = self.create_right_panel()
@@ -277,20 +288,76 @@ class ClientUI(QMainWindow):
         return sidebar
     
     def create_camera_view(self):
-        """카메라 뷰 생성"""
-        camera_label = QLabel()
-        camera_label.setFixedSize(CAM_WIDTH, CAM_HEIGHT)
-        camera_label.setAlignment(Qt.AlignCenter)
-        camera_label.setStyleSheet(f"""
+        """카메라 뷰 + 출석 현황 플롯 영역 생성"""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # 출석 현황 툴바 (플롯 위)
+        self.attendance_toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(self.attendance_toolbar)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(10)
+
+        self.today_attendance_btn = QPushButton("금일 출석 조회")
+        self.today_attendance_btn.setFixedHeight(30)
+        self.today_attendance_btn.setStyleSheet(self.get_button_style())
+        self.today_attendance_btn.setCursor(Qt.PointingHandCursor)
+        self.today_attendance_btn.clicked.connect(self._on_today_attendance_clicked)
+
+        self.date_attendance_btn = QPushButton("날짜별 조회")
+        self.date_attendance_btn.setFixedHeight(30)
+        self.date_attendance_btn.setStyleSheet(self.get_button_style())
+        self.date_attendance_btn.setCursor(Qt.PointingHandCursor)
+        self.date_attendance_btn.clicked.connect(self._on_date_attendance_clicked)
+
+        self.range_attendance_btn = QPushButton("기간 조회")
+        self.range_attendance_btn.setFixedHeight(30)
+        self.range_attendance_btn.setStyleSheet(self.get_button_style())
+        self.range_attendance_btn.setCursor(Qt.PointingHandCursor)
+        self.range_attendance_btn.clicked.connect(self._on_range_attendance_clicked)
+
+        toolbar_layout.addWidget(self.today_attendance_btn)
+        toolbar_layout.addWidget(self.date_attendance_btn)
+        toolbar_layout.addWidget(self.range_attendance_btn)
+        toolbar_layout.addStretch()
+
+        layout.addWidget(self.attendance_toolbar)
+
+        # 스택 영역 (카메라/플롯)
+        self.camera_stack = QStackedLayout()
+        layout.addLayout(self.camera_stack)
+
+        # 카메라 라벨
+        self.camera_label = QLabel()
+        self.camera_label.setFixedSize(CAM_WIDTH, CAM_HEIGHT)
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setStyleSheet(f"""
             background-color: {CAM_BG_COLOR};
             border: 3px solid {ACCENT_COLOR};
             border-radius: 10px;
         """)
-        camera_label.setText("📹 카메라 로딩 중...")
-        camera_label.setFont(QFont("Arial", 14))
-        camera_label.setStyleSheet(camera_label.styleSheet() + f"color: {TEXT_COLOR};")
-        
-        return camera_label
+        self.camera_label.setText("📹 카메라 로딩 중...")
+        self.camera_label.setFont(QFont("Arial", 14))
+        self.camera_label.setStyleSheet(self.camera_label.styleSheet() + f"color: {TEXT_COLOR};")
+
+        # 플롯 캔버스
+        self.plot_container = QWidget()
+        plot_layout = QVBoxLayout(self.plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.setSpacing(0)
+        self.plot_figure = Figure(figsize=(6, 4), dpi=100)
+        self.plot_canvas = FigureCanvas(self.plot_figure)
+        self.plot_canvas.setFixedSize(CAM_WIDTH, CAM_HEIGHT)
+        plot_layout.addWidget(self.plot_canvas)
+
+        self.camera_stack.addWidget(self.camera_label)
+        self.camera_stack.addWidget(self.plot_container)
+        self.camera_stack.setCurrentWidget(self.camera_label)
+        self.attendance_toolbar.setVisible(False)
+
+        return container
     
     def create_right_panel(self):
         """우측 정보 패널 생성"""
@@ -347,6 +414,26 @@ class ClientUI(QMainWindow):
         self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
         self.attendance_status_label.setAlignment(Qt.AlignCenter)
         status_layout.addWidget(self.attendance_status_label)
+
+        self.check_type_container = QWidget()
+        check_type_layout = QHBoxLayout(self.check_type_container)
+        check_type_layout.setContentsMargins(0, 0, 0, 0)
+        check_type_layout.setSpacing(8)
+
+        self.check_in_btn = QPushButton("입실")
+        self.check_out_btn = QPushButton("퇴실")
+        for btn in (self.check_in_btn, self.check_out_btn):
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(self.get_button_style(font_size=11))
+
+        self.check_in_btn.clicked.connect(lambda: self._set_check_type("in"))
+        self.check_out_btn.clicked.connect(lambda: self._set_check_type("out"))
+
+        check_type_layout.addWidget(self.check_in_btn)
+        check_type_layout.addWidget(self.check_out_btn)
+        status_layout.addWidget(self.check_type_container)
+        self.check_type_container.setVisible(False)
         
         self.detected_gesture_label = QLabel("제스처: -")
         self.detected_gesture_label.setStyleSheet(f"color: {TEXT_COLOR}; font-size: 12px;")
@@ -535,7 +622,7 @@ class ClientUI(QMainWindow):
                 continue
 
             similarity = self.cosine_similarity(embedding, known_vec)
-            similarity = min(float(similarity) * 2.0, 1.0)
+            similarity = min(float(similarity) * self.voice_sensitivity_multiplier, 1.0)
             if not np.isfinite(similarity):
                 print(f"⚠️  유사도 NaN: {known_name}")
                 continue
@@ -621,6 +708,10 @@ class ClientUI(QMainWindow):
             # 음성 에너지 확인
             rms = float(np.sqrt(np.mean(np.square(audio_data)))) if audio_data is not None else 0.0
             print(f"🔊 녹음 RMS: {rms:.6f}")
+            if rms < self.voice_activity_threshold:
+                if ui_updates:
+                    self.update_status("🔇 음성 미감지")
+                return "Unknown", 0.0, "no_voice"
 
             # 파일로 저장
             sf.write(temp_audio_file, audio_data, sample_rate)
@@ -1024,6 +1115,7 @@ class ClientUI(QMainWindow):
                     if voice_score_for_fusion > 0.0:
                         status_msg += f" + 음성: {voice_score_for_fusion*100:.1f}%"
                     self.detected_gesture_label.setText(status_msg)
+                    self._mark_attendance_if_needed(display_name, fusion_score)
                 elif face_name != "Unknown" and face_score > 0.7:
                     # 얼굴 인식 성공
                     self.user_name_label.setText(f"이름: {face_name}")
@@ -1045,6 +1137,8 @@ class ClientUI(QMainWindow):
                         f"color: {SUCCESS_COLOR}; font-size: 16px; font-weight: bold;"
                     )
                     self.detected_gesture_label.setText(f"얼굴: {face_score*100:.1f}% + 제스처: {gesture_detected}")
+                    if fusion_score >= 0.80:
+                        self._mark_attendance_if_needed(face_name, fusion_score)
                 else:
                     # 대기
                     self.attendance_status_label.setText("자동 인식 중...")
@@ -1095,40 +1189,122 @@ class ClientUI(QMainWindow):
         self.current_mode = mode_name
         if self.voice_auto_timer.isActive() and mode_name != "automation":
             self.voice_auto_timer.stop()
+        if self.voice_live_timer.isActive() and mode_name != "voice_attendance":
+            self.voice_live_timer.stop()
         
         if mode_name == "gesture_attendance":
+            self._show_camera_view()
             self.update_status("✋ 제스처 출석 모드 활성화")
             self.attendance_status_label.setText("제스처 대기 중...")
             self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
             
         elif mode_name == "face_attendance":
+            self._show_camera_view()
             self.update_status("😊 얼굴 인식 출석 모드 활성화")
             self.attendance_status_label.setText("얼굴 인식 중...")
             self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
             
         elif mode_name == "voice_attendance":
+            self._show_camera_view()
             self.update_status("🎤 음성 인식 출석 모드 활성화")
             self.attendance_status_label.setText("음성 녹음 대기 중...")
             self.attendance_status_label.setStyleSheet(f"color: {WARNING_COLOR}; font-size: 16px; font-weight: bold;")
-
-            # 마이크로 음성 녹음 후 인식
-            self.attendance_status_label.setText("녹음 중...")
-            threading.Thread(target=self._voice_attendance_worker, daemon=True).start()
+            # 실시간 음성 인식 시작 (짧은 구간 반복)
+            self.voice_live_timer.start(self.voice_live_interval_ms)
             
         elif mode_name == "automation":
+            self._show_camera_view()
             self.update_status("🧠 자동 인식 모드 활성화 (얼굴+제스처+음성)")
             self.attendance_status_label.setText("자동 인식 중...")
             self.attendance_status_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 16px; font-weight: bold;")
+            self._set_check_type("in")
+            if hasattr(self, "check_type_container"):
+                self.check_type_container.setVisible(True)
             # 자동 음성 인식 시작
             self.voice_auto_timer.start(self.voice_auto_interval_ms)
             
         elif mode_name == "attendance_status":
             self.update_status("📊 출석 현황 조회")
-            self.show_attendance_status_plot()
+            self._show_plot_view()
+            self.show_attendance_status_plot(date=datetime.now().date())
+        else:
+            if hasattr(self, "check_type_container"):
+                self.check_type_container.setVisible(False)
     
     def update_status(self, message):
         """상태바 업데이트"""
         self.status_bar.setText(message)
+
+    def _show_camera_view(self):
+        if hasattr(self, "camera_stack"):
+            self.camera_stack.setCurrentWidget(self.camera_label)
+        if hasattr(self, "attendance_toolbar"):
+            self.attendance_toolbar.setVisible(False)
+        if hasattr(self, "check_type_container"):
+            self.check_type_container.setVisible(False)
+
+    def _show_plot_view(self):
+        if hasattr(self, "camera_stack"):
+            self.camera_stack.setCurrentWidget(self.plot_container)
+        if hasattr(self, "attendance_toolbar"):
+            self.attendance_toolbar.setVisible(True)
+        if hasattr(self, "check_type_container"):
+            self.check_type_container.setVisible(False)
+
+    def _set_check_type(self, mode):
+        self.attendance_check_type = mode
+        if mode == "in":
+            self.check_in_btn.setStyleSheet(self.get_button_style(font_size=11) + f"border: 2px solid {SUCCESS_COLOR};")
+            self.check_out_btn.setStyleSheet(self.get_button_style(font_size=11))
+        else:
+            self.check_out_btn.setStyleSheet(self.get_button_style(font_size=11) + f"border: 2px solid {WARNING_COLOR};")
+            self.check_in_btn.setStyleSheet(self.get_button_style(font_size=11))
+
+    def _on_today_attendance_clicked(self):
+        self.show_attendance_status_plot(date=datetime.now().date())
+
+    def _on_date_attendance_clicked(self):
+        date_str, ok = QInputDialog.getText(self, "날짜별 조회", "날짜를 입력하세요 (YYYY-MM-DD):")
+        if not ok or not date_str.strip():
+            return
+        try:
+            selected_date = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            QMessageBox.warning(self, "출석 현황", "날짜 형식이 올바르지 않습니다.")
+            return
+
+        student_name, ok = QInputDialog.getText(self, "학생 지정", "학생 이름을 입력하세요:")
+        if not ok or not student_name.strip():
+            QMessageBox.warning(self, "출석 현황", "학생 이름을 입력해야 합니다.")
+            return
+
+        self.show_attendance_status_plot(date=selected_date, student_name=student_name.strip())
+
+    def _on_range_attendance_clicked(self):
+        start_str, ok = QInputDialog.getText(self, "기간 조회", "시작 날짜를 입력하세요 (YYYY-MM-DD):")
+        if not ok or not start_str.strip():
+            return
+        end_str, ok = QInputDialog.getText(self, "기간 조회", "종료 날짜를 입력하세요 (YYYY-MM-DD):")
+        if not ok or not end_str.strip():
+            return
+
+        try:
+            start_date = datetime.strptime(start_str.strip(), "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_str.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            QMessageBox.warning(self, "출석 현황", "날짜 형식이 올바르지 않습니다.")
+            return
+
+        if end_date < start_date:
+            QMessageBox.warning(self, "출석 현황", "종료 날짜는 시작 날짜보다 빠를 수 없습니다.")
+            return
+
+        student_name, ok = QInputDialog.getText(self, "학생 지정", "학생 이름을 입력하세요 (선택):")
+        if not ok:
+            return
+
+        student_name = student_name.strip() if student_name else None
+        self.show_attendance_status_plot(start_date=start_date, end_date=end_date, student_name=student_name)
 
     def _get_attendance_db_config(self):
         return {
@@ -1139,13 +1315,34 @@ class ClientUI(QMainWindow):
             "password": os.getenv("DB_PASSWORD", "orugu#0916"),
         }
 
-    def _fetch_attendance_records(self, limit=200):
+    def _fetch_attendance_records(self, limit=200, date_filter=None, start_date=None, end_date=None, employee_no=None, student_name=None):
         cfg = self._get_attendance_db_config()
         records = []
         sql = (
             'SELECT id, employee_no, name, email, created_at, check_in_time, check_out_time '
-            'FROM "UserData"."userdata" ORDER BY id DESC LIMIT %s'
+            'FROM "UserData"."userdata"'
         )
+        conditions = []
+        params = []
+
+        if date_filter:
+            conditions.append('DATE(check_in_time) = %s')
+            params.append(date_filter)
+        if start_date and end_date:
+            conditions.append('DATE(check_in_time) BETWEEN %s AND %s')
+            params.extend([start_date, end_date])
+        if employee_no:
+            conditions.append('employee_no = %s')
+            params.append(employee_no)
+        if student_name:
+            conditions.append('name = %s')
+            params.append(student_name)
+
+        if conditions:
+            sql += ' WHERE ' + ' AND '.join(conditions)
+
+        sql += ' ORDER BY id DESC LIMIT %s'
+        params.append(limit)
 
         encoding_primary = os.getenv("ATTENDANCE_DB_ENCODING", "UTF8")
         encoding_fallback = os.getenv("ATTENDANCE_DB_ENCODING_FALLBACK", "EUC_KR")
@@ -1165,7 +1362,7 @@ class ClientUI(QMainWindow):
             ) as conn:
                 conn.set_client_encoding(client_encoding)
                 with conn.cursor() as cur:
-                    cur.execute(sql, (limit,))
+                    cur.execute(sql, params)
                     return cur.fetchall()
 
         try:
@@ -1188,7 +1385,77 @@ class ClientUI(QMainWindow):
             })
         return records
 
-    def show_attendance_status_plot(self):
+    def _mark_attendance_if_needed(self, name, fusion_score):
+        if not name or name == "Unknown":
+            return
+        now = datetime.now()
+        cfg = self._get_attendance_db_config()
+
+        encoding_primary = os.getenv("ATTENDANCE_DB_ENCODING", "UTF8")
+        encoding_fallback = os.getenv("ATTENDANCE_DB_ENCODING_FALLBACK", "EUC_KR")
+        encoding_last_resort = os.getenv("ATTENDANCE_DB_ENCODING_LAST", "LATIN1")
+
+        def _run(client_encoding: str):
+            os.environ["PGCLIENTENCODING"] = client_encoding
+            import psycopg2
+            with psycopg2.connect(
+                host=cfg["host"],
+                port=cfg["port"],
+                dbname=cfg["dbname"],
+                user=cfg["user"],
+                password=cfg["password"],
+                connect_timeout=5,
+                options=f"-c client_encoding={client_encoding} -c lc_messages=C"
+            ) as conn:
+                conn.set_client_encoding(client_encoding)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        'SELECT user_id, email FROM "UserData".userbasicdata WHERE name = %s ORDER BY user_id LIMIT 1',
+                        (name,)
+                    )
+                    row = cur.fetchone()
+                    employee_no = row[0] if row else "UNKNOWN"
+                    email = row[1] if row else "unknown@example.com"
+
+                    cur.execute(
+                        'SELECT id FROM "UserData"."userdata" WHERE employee_no = %s AND DATE(check_in_time) = %s LIMIT 1',
+                        (employee_no, now.date())
+                    )
+                    existing = cur.fetchone()
+
+                    if self.attendance_check_type == "out":
+                        if existing:
+                            cur.execute(
+                                'UPDATE "UserData"."userdata" SET check_out_time = %s WHERE id = %s',
+                                (now, existing[0])
+                            )
+                        else:
+                            cur.execute(
+                                'INSERT INTO "UserData"."userdata" (employee_no, name, email, created_at, check_in_time, check_out_time) '
+                                'VALUES (%s, %s, %s, %s, %s, %s)',
+                                (employee_no, name, email, now, now, now)
+                            )
+                        return
+
+                    if existing:
+                        return
+
+                    cur.execute(
+                        'INSERT INTO "UserData"."userdata" (employee_no, name, email, created_at, check_in_time) '
+                        'VALUES (%s, %s, %s, %s, %s)',
+                        (employee_no, name, email, now, now)
+                    )
+                conn.commit()
+
+        try:
+            _run(encoding_primary)
+        except UnicodeDecodeError:
+            try:
+                _run(encoding_fallback)
+            except UnicodeDecodeError:
+                _run(encoding_last_resort)
+
+    def show_attendance_status_plot(self, date=None, start_date=None, end_date=None, employee_no=None, student_name=None):
         # Matplotlib 한글 폰트 설정 (Windows 기본: 맑은 고딕)
         try:
             malgun = "C:\\Windows\\Fonts\\malgun.ttf"
@@ -1205,7 +1472,14 @@ class ClientUI(QMainWindow):
             pass
 
         try:
-            records = self._fetch_attendance_records(limit=200)
+            records = self._fetch_attendance_records(
+                limit=200,
+                date_filter=date,
+                start_date=start_date,
+                end_date=end_date,
+                employee_no=employee_no,
+                student_name=student_name
+            )
         except UnicodeDecodeError:
             cfg = self._get_attendance_db_config()
             QMessageBox.warning(
@@ -1221,7 +1495,11 @@ class ClientUI(QMainWindow):
             return
 
         if not records:
-            QMessageBox.information(self, "출석 현황", "조회된 출석 데이터가 없습니다.")
+            self.plot_figure.clear()
+            ax = self.plot_figure.add_subplot(111)
+            ax.axis('off')
+            ax.text(0.5, 0.5, "자료가 없어요 ㅠ.ㅠ", ha='center', va='center', fontsize=14)
+            self.plot_canvas.draw()
             return
 
         records = list(reversed(records))
@@ -1237,15 +1515,30 @@ class ClientUI(QMainWindow):
 
         x = list(range(len(labels)))
 
-        plt.figure(figsize=(12, 6))
-        plt.plot(x, check_in, marker='o', label='Check-in')
-        plt.plot(x, check_out, marker='o', label='Check-out')
-        plt.title("출석 현황 (Check-in/Check-out)")
-        plt.xlabel("사용자")
-        plt.ylabel("시간")
-        plt.xticks(x, labels, rotation=45, ha='right')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
+        self.plot_figure.clear()
+        ax = self.plot_figure.add_subplot(111)
+        ax.plot(x, check_in, marker='o', label='Check-in')
+        ax.plot(x, check_out, marker='o', label='Check-out')
+
+        title = "출석 현황 (Check-in/Check-out)"
+        if start_date and end_date:
+            if employee_no or student_name:
+                target = employee_no or student_name
+                title = f"출석 현황 - {target} ({start_date}~{end_date})"
+            else:
+                title = f"기간 출석 현황 ({start_date}~{end_date})"
+        elif date and (employee_no or student_name):
+            target = employee_no or student_name
+            title = f"출석 현황 - {target} ({date})"
+        elif date:
+            title = f"금일 출석 현황 ({date})"
+        ax.set_title(title)
+        ax.set_xlabel("사용자")
+        ax.set_ylabel("시간")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha='right')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
 
         def minutes_to_hhmm(value, _):
             if value is None:
@@ -1254,9 +1547,9 @@ class ClientUI(QMainWindow):
             minutes = int(value % 60)
             return f"{hours:02d}:{minutes:02d}"
 
-        plt.gca().yaxis.set_major_formatter(ticker.FuncFormatter(minutes_to_hhmm))
-        plt.tight_layout()
-        plt.show()
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(minutes_to_hhmm))
+        self.plot_figure.tight_layout()
+        self.plot_canvas.draw()
     
     def keyPressEvent(self, event):
         """키보드 이벤트 핸들러"""
@@ -1279,6 +1572,23 @@ class ClientUI(QMainWindow):
         self.voice_auto_running = True
         threading.Thread(target=self._voice_auto_worker, daemon=True).start()
 
+    def _start_voice_live_recognition(self):
+        """음성 모드에서 실시간 음성 인식 실행"""
+        if self.current_mode != "voice_attendance":
+            if self.voice_live_timer.isActive():
+                self.voice_live_timer.stop()
+            return
+
+        if self.voice_live_running:
+            return
+
+        if not SPEECHBRAIN_AVAILABLE or self.voice_encoder is None:
+            self.update_status("⚠️  음성 인식 모델이 준비되지 않았습니다")
+            return
+
+        self.voice_live_running = True
+        threading.Thread(target=self._voice_live_worker, daemon=True).start()
+
     def _voice_auto_worker(self):
         try:
             name, confidence, error = self.record_voice_and_recognize_internal(
@@ -1295,6 +1605,19 @@ class ClientUI(QMainWindow):
         finally:
             self.voice_auto_running = False
 
+    def _voice_live_worker(self):
+        try:
+            name, confidence, error = self.record_voice_and_recognize_internal(
+                duration=self.voice_live_duration,
+                sample_rate=16000,
+                ui_updates=False
+            )
+            if error == "no_voice":
+                return
+            self.voice_attendance_result.emit(name, confidence, error)
+        finally:
+            self.voice_live_running = False
+
     def _voice_attendance_worker(self):
         name, confidence, error = self.record_voice_and_recognize_internal(
             duration=3,
@@ -1304,7 +1627,10 @@ class ClientUI(QMainWindow):
         self.voice_attendance_result.emit(name, confidence, error)
 
     def handle_voice_attendance_result(self, name, confidence, error):
-        threshold = 0.60
+        threshold = self.voice_similarity_threshold
+
+        if error == "no_voice":
+            return
 
         if error:
             self.attendance_status_label.setText("음성 인식 실패")

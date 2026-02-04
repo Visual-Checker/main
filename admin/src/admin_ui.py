@@ -8,9 +8,11 @@ import cv2
 import os
 import pickle
 import numpy as np
+import psycopg2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QLineEdit, QMessageBox, QInputDialog, QFileDialog
+    QVBoxLayout, QHBoxLayout, QLineEdit, QMessageBox, QInputDialog, QFileDialog,
+    QDialog, QComboBox, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPalette, QColor
@@ -20,6 +22,7 @@ from lib.voice_service import VoiceService
 
 # 제스처 인식 서비스 import
 from lib.gesture_service import GestureService
+from lib.vector_db import FaceRecog, HandGesture, VoiceRecog, list_entries, update_label, delete_entry, create_entry
 
 # MediaPipe import
 MEDIAPIPE_AVAILABLE = False
@@ -61,6 +64,7 @@ class AdminUI(QMainWindow):
         
         # 음성 서비스 초기화
         self.voice_service = VoiceService()
+        self.voice_service.load_voice_data()
         
         # 제스처 서비스 초기화
         self.gesture_service = GestureService()
@@ -227,6 +231,36 @@ class AdminUI(QMainWindow):
         self.name_input.setPlaceholderText("이름 입력")
         self.name_input.setStyleSheet(self.get_input_style())
         layout.addWidget(self.name_input)
+
+        id_label = QLabel("ID:")
+        id_label.setStyleSheet(f"color: {TEXT_COLOR}; font-size: 11px;")
+        layout.addWidget(id_label)
+
+        self.user_id_input = QLineEdit()
+        self.user_id_input.setFixedSize(INPUT_FIELD_WIDTH, INPUT_FIELD_HEIGHT)
+        self.user_id_input.setPlaceholderText("ID 입력")
+        self.user_id_input.setStyleSheet(self.get_input_style())
+        layout.addWidget(self.user_id_input)
+
+        email_label = QLabel("이메일:")
+        email_label.setStyleSheet(f"color: {TEXT_COLOR}; font-size: 11px;")
+        layout.addWidget(email_label)
+
+        self.email_input = QLineEdit()
+        self.email_input.setFixedSize(INPUT_FIELD_WIDTH, INPUT_FIELD_HEIGHT)
+        self.email_input.setPlaceholderText("email@example.com")
+        self.email_input.setStyleSheet(self.get_input_style())
+        layout.addWidget(self.email_input)
+
+        phone_label = QLabel("전화번호:")
+        phone_label.setStyleSheet(f"color: {TEXT_COLOR}; font-size: 11px;")
+        layout.addWidget(phone_label)
+
+        self.phone_input = QLineEdit()
+        self.phone_input.setFixedSize(INPUT_FIELD_WIDTH, INPUT_FIELD_HEIGHT)
+        self.phone_input.setPlaceholderText("010-0000-0000")
+        self.phone_input.setStyleSheet(self.get_input_style())
+        layout.addWidget(self.phone_input)
         
         layout.addStretch()
         
@@ -249,7 +283,9 @@ class AdminUI(QMainWindow):
     
     def load_face_data(self):
         """저장된 얼굴 데이터 로드"""
-        face_data_file = "../data/face_data.pkl"
+        face_data_file = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'face_data.pkl')
+        )
         
         if os.path.exists(face_data_file):
             try:
@@ -265,7 +301,9 @@ class AdminUI(QMainWindow):
     
     def save_face_data(self):
         """얼굴 데이터 저장"""
-        face_data_file = "../data/face_data.pkl"
+        face_data_file = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'face_data.pkl')
+        )
         os.makedirs(os.path.dirname(face_data_file), exist_ok=True)
         
         data = {
@@ -434,6 +472,199 @@ class AdminUI(QMainWindow):
                     self.voice_recognize_mode()
         elif button_name == "gesture_register":
             self.gesture_register_mode()
+        elif button_name == "data_manage":
+            self.open_data_management()
+
+    def open_data_management(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("등록 데이터 관리")
+        dialog.setMinimumSize(700, 500)
+
+        main_layout = QVBoxLayout(dialog)
+
+        control_layout = QHBoxLayout()
+        control_layout.addWidget(QLabel("데이터 유형:"))
+
+        type_combo = QComboBox()
+        type_combo.addItems(["얼굴 인식", "손동작 인식", "음성 인식"])
+        control_layout.addWidget(type_combo)
+
+        refresh_btn = QPushButton("새로고침")
+        add_btn = QPushButton("추가")
+        update_btn = QPushButton("라벨 변경")
+        delete_btn = QPushButton("삭제")
+
+        for btn in [refresh_btn, add_btn, update_btn, delete_btn]:
+            btn.setStyleSheet(self.get_button_style(font_size=10))
+
+        control_layout.addWidget(refresh_btn)
+        control_layout.addWidget(add_btn)
+        control_layout.addWidget(update_btn)
+        control_layout.addWidget(delete_btn)
+        control_layout.addStretch()
+
+        main_layout.addLayout(control_layout)
+
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["선택", "Source", "ID", "Label", "Created At"])
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.MultiSelection)
+        table.horizontalHeader().setStretchLastSection(True)
+        main_layout.addWidget(table)
+
+        def _get_model():
+            index = type_combo.currentIndex()
+            if index == 0:
+                return FaceRecog
+            if index == 1:
+                return HandGesture
+            return VoiceRecog
+
+        def _get_local_labels():
+            index = type_combo.currentIndex()
+            if index == 0:
+                return sorted(set(self.known_face_names))
+            if index == 1:
+                labels = []
+                for entries in self.gesture_service.known_gestures.values():
+                    labels.extend([e.get("name") for e in entries if e.get("name")])
+                return sorted(set(labels))
+            return sorted(set(self.voice_service.known_voice_names))
+
+        def _load_table():
+            model_cls = _get_model()
+            rows = list_entries(model_cls)
+            table.setRowCount(0)
+            for label in _get_local_labels():
+                row = table.rowCount()
+                table.insertRow(row)
+                check_item = QTableWidgetItem()
+                check_item.setCheckState(Qt.Unchecked)
+                table.setItem(row, 0, check_item)
+                table.setItem(row, 1, QTableWidgetItem("LOCAL"))
+                table.setItem(row, 2, QTableWidgetItem("-"))
+                table.setItem(row, 3, QTableWidgetItem(label))
+                table.setItem(row, 4, QTableWidgetItem("-"))
+            for row_id, label, created_at in rows:
+                row = table.rowCount()
+                table.insertRow(row)
+                check_item = QTableWidgetItem()
+                check_item.setCheckState(Qt.Unchecked)
+                table.setItem(row, 0, check_item)
+                table.setItem(row, 1, QTableWidgetItem("DB"))
+                table.setItem(row, 2, QTableWidgetItem(str(row_id)))
+                table.setItem(row, 3, QTableWidgetItem(label))
+                table.setItem(row, 4, QTableWidgetItem(str(created_at)))
+
+        def _get_selected_id():
+            pass
+        
+        def _get_checked_rows():
+            checked = []
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item and item.checkState() == Qt.Checked:
+                    source_item = table.item(row, 1)
+                    id_item = table.item(row, 2)
+                    label_item = table.item(row, 3)
+                    source = source_item.text() if source_item else None
+                    record_id = int(id_item.text()) if id_item and id_item.text().isdigit() else None
+                    label = label_item.text() if label_item else None
+                    checked.append((source, record_id, label))
+            return checked
+
+        def _handle_refresh():
+            _load_table()
+
+        def _handle_add():
+            label, ok = QInputDialog.getText(dialog, "데이터 추가", "Label 입력:")
+            if not ok or not label.strip():
+                return
+            emb_str, ok = QInputDialog.getText(dialog, "데이터 추가", "임베딩 벡터를 쉼표로 입력하세요:")
+            if not ok or not emb_str.strip():
+                return
+            try:
+                embedding = [float(x.strip()) for x in emb_str.split(',') if x.strip()]
+                if not embedding:
+                    raise ValueError("empty")
+            except Exception:
+                QMessageBox.warning(dialog, "입력 오류", "임베딩 형식이 올바르지 않습니다.")
+                return
+            create_entry(_get_model(), label.strip(), embedding)
+            _load_table()
+
+        def _handle_update():
+            checked = _get_checked_rows()
+            if not checked:
+                QMessageBox.warning(dialog, "선택 필요", "변경할 항목을 체크하세요.")
+                return
+            if len(checked) > 1:
+                QMessageBox.warning(dialog, "선택 필요", "라벨 변경은 하나만 선택하세요.")
+                return
+            source, record_id, _ = checked[0]
+            if record_id is None or source != "DB":
+                QMessageBox.warning(dialog, "선택 필요", "DB 항목만 변경할 수 있습니다.")
+                return
+            new_label, ok = QInputDialog.getText(dialog, "라벨 변경", "새 Label:")
+            if not ok or not new_label.strip():
+                return
+            if not update_label(_get_model(), record_id, new_label.strip()):
+                QMessageBox.warning(dialog, "오류", "라벨 변경에 실패했습니다.")
+                return
+            _load_table()
+
+        def _handle_delete():
+            checked = _get_checked_rows()
+            if not checked:
+                QMessageBox.warning(dialog, "선택 필요", "삭제할 항목을 체크하세요.")
+                return
+            db_rows = [r for r in checked if r[0] == "DB" and r[1] is not None]
+            local_rows = [r for r in checked if r[0] == "LOCAL" and r[2]]
+
+            total_count = len(db_rows) + len(local_rows)
+            if total_count == 0:
+                QMessageBox.warning(dialog, "선택 필요", "삭제할 항목을 체크하세요.")
+                return
+
+            if QMessageBox.question(dialog, "삭제 확인", f"선택한 {total_count}건을 삭제하시겠습니까?") != QMessageBox.Yes:
+                return
+
+            for _, record_id, _ in db_rows:
+                delete_entry(_get_model(), record_id)
+
+            if local_rows:
+                index = type_combo.currentIndex()
+                labels = [r[2] for r in local_rows]
+                if index == 0:
+                    filtered = [(f, n) for f, n in zip(self.known_face_features, self.known_face_names) if n not in labels]
+                    self.known_face_features = [f for f, _ in filtered]
+                    self.known_face_names = [n for _, n in filtered]
+                    self.save_face_data()
+                elif index == 1:
+                    for gesture_type in list(self.gesture_service.known_gestures.keys()):
+                        entries = self.gesture_service.known_gestures.get(gesture_type, [])
+                        entries = [e for e in entries if e.get("name") not in labels]
+                        if entries:
+                            self.gesture_service.known_gestures[gesture_type] = entries
+                        else:
+                            self.gesture_service.known_gestures.pop(gesture_type, None)
+                    self.gesture_service.save_gesture_data()
+                else:
+                    filtered = [(e, n) for e, n in zip(self.voice_service.known_voice_embeddings, self.voice_service.known_voice_names) if n not in labels]
+                    self.voice_service.known_voice_embeddings = [e for e, _ in filtered]
+                    self.voice_service.known_voice_names = [n for _, n in filtered]
+                    self.voice_service.save_voice_data()
+
+            _load_table()
+
+        refresh_btn.clicked.connect(_handle_refresh)
+        add_btn.clicked.connect(_handle_add)
+        update_btn.clicked.connect(_handle_update)
+        delete_btn.clicked.connect(_handle_delete)
+        type_combo.currentIndexChanged.connect(_load_table)
+
+        _load_table()
+        dialog.exec_()
     
     def on_right_button_click(self, button_name):
         """우측 버튼 클릭 이벤트"""
@@ -461,10 +692,21 @@ class AdminUI(QMainWindow):
             return
         
         name = self.name_input.text().strip()
+        user_id = self.user_id_input.text().strip() if hasattr(self, "user_id_input") else ""
+        email = self.email_input.text().strip() if hasattr(self, "email_input") else ""
+        phone = self.phone_input.text().strip() if hasattr(self, "phone_input") else ""
         
         if not name:
             self.update_status("❌ 이름을 입력해주세요", error=True)
             QMessageBox.warning(self, "입력 필요", "이름을 입력해주세요.")
+            return
+
+        if not user_id or not email or not phone:
+            self.update_status("❌ ID/이메일/전화번호를 입력해주세요", error=True)
+            QMessageBox.warning(self, "입력 필요", "ID, 이메일, 전화번호를 모두 입력해주세요.")
+            return
+
+        if not self._upsert_user_basic_data(user_id, name, email, phone):
             return
         
         # 얼굴 감지 및 특징 추출
@@ -527,6 +769,12 @@ class AdminUI(QMainWindow):
         
         # 입력 필드 초기화
         self.name_input.clear()
+        if hasattr(self, "user_id_input"):
+            self.user_id_input.clear()
+        if hasattr(self, "email_input"):
+            self.email_input.clear()
+        if hasattr(self, "phone_input"):
+            self.phone_input.clear()
         self.captured_frame = None
     
     def input_user_info(self):
@@ -535,6 +783,67 @@ class AdminUI(QMainWindow):
         if ok and name:
             self.name_input.setText(name)
             self.update_status(f"✏️ 입력 완료: {name}")
+
+    def _get_userbasic_db_config(self):
+        return {
+            "host": os.getenv("DB_HOST", "192.168.0.41"),
+            "port": int(os.getenv("DB_PORT", "5432")),
+            "dbname": os.getenv("DB_NAME", "devserver"),
+            "user": os.getenv("DB_USER", "orugu"),
+            "password": os.getenv("DB_PASSWORD", "orugu#0916"),
+        }
+
+    def _ensure_userbasicdata_schema(self, conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS "UserData".userbasicdata (
+                    user_id VARCHAR PRIMARY KEY,
+                    name VARCHAR,
+                    email VARCHAR,
+                    phone VARCHAR,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute("ALTER TABLE \"UserData\".userbasicdata ADD COLUMN IF NOT EXISTS user_id VARCHAR")
+            cur.execute("ALTER TABLE \"UserData\".userbasicdata ADD COLUMN IF NOT EXISTS name VARCHAR")
+            cur.execute("ALTER TABLE \"UserData\".userbasicdata ADD COLUMN IF NOT EXISTS email VARCHAR")
+            cur.execute("ALTER TABLE \"UserData\".userbasicdata ADD COLUMN IF NOT EXISTS phone VARCHAR")
+            cur.execute("ALTER TABLE \"UserData\".userbasicdata ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS userbasicdata_user_id_uidx ON \"UserData\".userbasicdata (user_id)"
+            )
+
+    def _upsert_user_basic_data(self, user_id, name, email, phone):
+        cfg = self._get_userbasic_db_config()
+        try:
+            with psycopg2.connect(
+                host=cfg["host"],
+                port=cfg["port"],
+                dbname=cfg["dbname"],
+                user=cfg["user"],
+                password=cfg["password"],
+                connect_timeout=5,
+                options="-c lc_messages=C"
+            ) as conn:
+                self._ensure_userbasicdata_schema(conn)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO "UserData".userbasicdata (user_id, name, email, phone, created_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (user_id)
+                        DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email, phone = EXCLUDED.phone
+                        """,
+                        (user_id, name, email, phone)
+                    )
+                conn.commit()
+            return True
+        except Exception as e:
+            self.update_status("❌ 사용자 정보 저장 실패", error=True)
+            QMessageBox.warning(self, "저장 실패", f"사용자 정보 저장 실패: {e}")
+            return False
     
     def update_status(self, message, error=False):
         """상태바 업데이트"""

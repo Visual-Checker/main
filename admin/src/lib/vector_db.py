@@ -60,6 +60,38 @@ def _upsert_by_label(session, model_cls, label, embedding):
     session.commit()
 
 
+def create_entry(model_cls, label, embedding):
+    with SessionLocal() as session:
+        session.add(model_cls(label=label, embedding=embedding))
+        session.commit()
+
+
+def list_entries(model_cls):
+    with SessionLocal() as session:
+        rows = session.query(model_cls).order_by(model_cls.id.desc()).all()
+        return [(r.id, r.label, r.created_at) for r in rows]
+
+
+def update_label(model_cls, record_id, new_label):
+    with SessionLocal() as session:
+        row = session.query(model_cls).filter(model_cls.id == record_id).first()
+        if not row:
+            return False
+        row.label = new_label
+        session.commit()
+        return True
+
+
+def delete_entry(model_cls, record_id):
+    with SessionLocal() as session:
+        row = session.query(model_cls).filter(model_cls.id == record_id).first()
+        if not row:
+            return False
+        session.delete(row)
+        session.commit()
+        return True
+
+
 def upsert_face(label, embedding):
     with SessionLocal() as session:
         _upsert_by_label(session, FaceRecog, label, embedding)
