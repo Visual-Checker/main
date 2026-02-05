@@ -81,11 +81,7 @@ python src\client_ui.py
 ```
 
 ## 서버 실행 (API 모드)
-
-```bash
-cd admin
-python src/app.py
-```
+-server 쪽 repository 참고
 
 API 기본 경로: `http://<host>:5000/`
 
