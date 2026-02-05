@@ -1,52 +1,106 @@
-# Multimodal User Recognition System 🚀
+# Visual Checker
 
-## 1. 시스템 목적 🎯
+얼굴, 제스처, 음성 정보를 활용해 사용자를 식별하고 출석 이벤트를 기록하는 프로젝트입니다.
 
-본 시스템은 **얼굴·제스처·음성 기반 멀티모달 인식**을 통해 사용자를 식별하고, 출입(Check-in / Check-out) 및 권한 승인을 수행하는 것을 목표로 한다.
+## 핵심 구성
 
-- **Server / Admin**: 데이터 등록(Enrollment) 및 관리
-- **Client**: 실시간 추론(Inference) 및 사용자 상호작용
+- **Admin (서버/관리자)**: Flask 기반 API 및 관리자 UI, ZMQ 수신/캐시
+- **Client (클라이언트)**: PyQt5 기반 UI, 실시간 인식 및 이벤트 전송
+- **DB**: PostgreSQL + SQLAlchemy
 
-> 일단 기억해둠 (초기 설계 명세)
+## 폴더 구조
 
----
+- **admin/**: 서버 및 관리자 UI
+- **client/**: 클라이언트 UI
+- **data/**: 로컬 실행 시 생성되는 데이터(리포지토리에 포함하지 않음)
+- **run_client_admin.ps1**: 관리자/클라이언트 실행 메뉴
 
-## 2. 전체 아키텍처 개요 🏗️
+## 요구사항
 
-### 2.1 구성 요소
+- Python 3.10 이상
+- PostgreSQL (로컬 또는 서버)
+- Windows 10/11 (클라이언트), Ubuntu 24.04 (서버 권장)
 
-**Server / Admin**
-- Face Recognition: DeepInsight / InsightFace
-- Gesture Recognition: MediaPipe Hands
-- Voice Recognition: SpeechBrain (ECAPA-TDNN)
-- Decision / Log Service
+모델 파일(.ckpt)은 Git LFS로 관리됩니다. 최초 클론 후 아래 명령을 권장합니다.
 
-**Client**
-- User Recognition (실시간 추론)
-- Check-in / Check-out Checker (vector 기반)
-- Logger
+```bash
+git lfs install
+git lfs pull
+```
 
-**DB 계층**
-- PostgreSQL (메타데이터, 권한, 로그)
-- Vector Store (얼굴/제스처/음성 임베딩)
+## 빠른 시작 (Windows)
 
----
+### 1) 의존성 설치
 
-## 3. 개발 / 배포 환경 ⚙️
+```powershell
+cd admin
+pip install -r requirements.txt
 
-- **서버 OS**: `Ubuntu 24.04`
-- **클라이언트 OS**: `Windows 10`
+cd ..\client
+pip install -r requirements.txt
+```
 
----
+### 2) 로컬 환경 변수 설정
 
-## 4. 초기 작업 제안 🔧
+admin 폴더에 `.env.local`을 만들고 최소 아래 항목을 설정하세요.
 
-- `server/`에 `Dockerfile` 또는 `devcontainer` 추가 (기본 이미지: `ubuntu:24.04`)
-- `server/`에 Flask 기반 **관리자(Admin) 웹 UI** 스켈레톤(`templates/admin`, `routes/admin`) 추가 (로그인, 대시보드, 통계 API) ✅
-- `client/`에 `README.md`로 Windows 10 설치 및 실행 안내 추가
-- `client/`에 PyQt 기반 UI 샘플(`client_ui.py`)과 의존성 없이 실행 가능한 라이트 모드(`client_ui_light.py`) 추가
-- CI: GitHub Actions에서 `ubuntu-24.04` / `windows-latest` 매트릭스 설정
+```
+DB_USER=admin
+DB_PASSWORD=admin123
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=attendance_system
+SECRET_KEY=local-dev-secret-key
+```
 
----
+### 3) 로컬 서버 실행 (PostgreSQL + ZMQ + Flask)
 
-추가로 반영할 요구사항이나 수정할 내용이 있으면 알려주세요.
+```powershell
+cd admin
+python src\run_local_server.py
+```
+
+관리자 UI: http://127.0.0.1:5000/admin
+
+### 4) 관리자/클라이언트 UI 실행
+
+```powershell
+# 관리자 UI
+cd admin
+python src\admin_ui.py
+
+# 클라이언트 UI
+cd ..\client
+python src\client_ui.py
+```
+
+또는 다음 스크립트로 실행할 수 있습니다.
+
+```powershell
+\run_client_admin.ps1
+```
+
+## 서버 실행 (API 모드)
+
+```bash
+cd admin
+python src/app.py
+```
+
+API 기본 경로: `http://<host>:5000/`
+
+## 데이터베이스
+
+- 로컬/서버 모두 PostgreSQL 사용
+- SQLAlchemy 모델은 [admin/src/lib/database.py](admin/src/lib/database.py)에 정의
+- 로컬 서버용 경량 테이블은 [admin/src/lib/database_local.py](admin/src/lib/database_local.py)에서 관리
+
+## 참고 문서
+
+- 서버 설치: [admin/SERVER_SETUP.md](admin/SERVER_SETUP.md)
+- 클라이언트 설치: [client/CLIENT_SETUP.md](client/CLIENT_SETUP.md)
+
+## 문제 해결
+
+- PostgreSQL 연결 오류: 호스트/포트/계정 정보 확인 후 재시도
+- ZMQ 수신 확인: `tcp://localhost:5555` 포트가 열려 있는지 확인
